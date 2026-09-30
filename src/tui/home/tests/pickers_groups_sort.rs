@@ -2162,3 +2162,63 @@ fn test_moving_a_group_without_a_stored_row_persists() {
     let paths: Vec<String> = stored.into_iter().map(|g| g.path).collect();
     assert_eq!(paths, ["beta", "alpha"], "permutation reached the store");
 }
+
+/// A peer can delete a group while this view holds a tree that still lists it. The move must
+/// be computed from what the store holds, or writing the stale tree back resurrects it.
+#[test]
+#[serial]
+fn test_moving_a_group_does_not_resurrect_a_peer_deleted_one() {
+    use crate::session::config::SortOrder;
+
+    let instances = [
+        instance_in("a1", "/tmp/a1", "alpha"),
+        instance_in("b1", "/tmp/b1", "beta"),
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    env.view.apply_sort_order(SortOrder::Custom);
+
+    // A peer removes "gamma" (present on disk and in this view's tree) behind our back.
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|_, groups| {
+            groups.push(crate::session::Group {
+                name: "gamma".to_string(),
+                path: "gamma".to_string(),
+                collapsed: false,
+                archived_at: None,
+                children: Vec::new(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    env.view.reload_storage_only().unwrap();
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|_, groups| {
+            groups.retain(|g| g.path != "gamma");
+            Ok(())
+        })
+        .unwrap();
+
+    let header = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Group { name, .. } if name == "alpha"))
+        .expect("alpha header");
+    env.view.cursor = header;
+    env.view.update_selected();
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+
+    let (_, stored) = Storage::open_unwatched("test")
+        .unwrap()
+        .load_with_groups()
+        .unwrap();
+    let paths: Vec<String> = stored.into_iter().map(|g| g.path).collect();
+    assert!(
+        !paths.iter().any(|p| p == "gamma"),
+        "the peer's deletion stands: {paths:?}"
+    );
+    assert_eq!(paths, ["beta", "alpha"], "and the move still landed");
+}

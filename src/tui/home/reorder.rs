@@ -206,34 +206,46 @@ impl HomeView {
         else {
             return Ok(());
         };
-        let Some(tree) = self.group_trees.get_mut(&profile) else {
+        let Some(storage) = self.storages.get(&profile) else {
             return Ok(());
         };
-        if !tree.move_group(group_path, delta) {
+        // Collapsed state is the view's, not the store's: rebuilding the tree from disk
+        // inside the transaction would otherwise re-expand what the user folded.
+        let collapsed: HashMap<String, bool> = self
+            .group_trees
+            .get(&profile)
+            .map(|t| {
+                t.get_all_groups()
+                    .into_iter()
+                    .map(|g| (g.path, g.collapsed))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Build the tree from what the store actually holds, inside the lock. Moving the
+        // in-memory tree and writing that back would resurrect a group a peer deleted while
+        // this view was open, and drop metadata the peer changed.
+        let moved: Option<Vec<Group>> = storage.update(|instances, disk_groups| {
+            let mut tree = GroupTree::new_with_groups(instances, disk_groups);
+            if !tree.move_group(group_path, delta) {
+                return Ok(None);
+            }
+            let mut groups = tree.get_all_groups();
+            for g in &mut groups {
+                if let Some(state) = collapsed.get(&g.path) {
+                    g.collapsed = *state;
+                }
+            }
+            *disk_groups = groups.clone();
+            Ok(Some(groups))
+        })?;
+
+        let Some(groups) = moved else {
             return Ok(());
-        }
-        let groups = tree.get_all_groups();
-        if let Some(storage) = self.storages.get(&profile) {
-            storage.update(|_instances, disk_groups| {
-                // `save()` merges groups by path in place, so it cannot express a permutation.
-                // A group the tree synthesized from a session's path has no disk row yet and
-                // must still be written, or its position is lost on the next load.
-                let mut reordered: Vec<Group> = Vec::with_capacity(groups.len());
-                for g in &groups {
-                    match disk_groups.iter().find(|d| d.path == g.path) {
-                        Some(existing) => reordered.push(existing.clone()),
-                        None => reordered.push(g.clone()),
-                    }
-                }
-                for d in disk_groups.iter() {
-                    if !reordered.iter().any(|r| r.path == d.path) {
-                        reordered.push(d.clone());
-                    }
-                }
-                *disk_groups = reordered;
-                Ok(())
-            })?;
-        }
+        };
+        let instances = self.cloned_instances_for_profile(&profile);
+        self.group_trees
+            .insert(profile, GroupTree::new_with_groups(&instances, &groups));
         self.rebuild_flat_items_keeping_cursor();
         Ok(())
     }
