@@ -2222,3 +2222,49 @@ fn test_moving_a_group_does_not_resurrect_a_peer_deleted_one() {
     );
     assert_eq!(paths, ["beta", "alpha"], "and the move still landed");
 }
+
+/// Two profiles can hold the same group path. Restoring the cursor by path alone lands it on
+/// whichever comes first, leaving `selected_group_profile` naming the other profile, so the
+/// next move would reorder a profile the cursor is not on.
+#[test]
+#[serial]
+fn test_cursor_restore_keeps_the_group_profile() {
+    let temp = TempDir::new().unwrap();
+    let _guard = setup_test_home(&temp);
+
+    crate::session::create_profile("first").unwrap();
+    crate::session::create_profile("second").unwrap();
+    seed_profile("first", &[instance_in("a1", "/tmp/a1", "work")]);
+    seed_profile("second", &[instance_in("b1", "/tmp/b1", "work")]);
+
+    let mut view = HomeView::new_for_test(
+        None,
+        AvailableTools::with_tools(&["claude"]),
+        crate::file_watch::FileWatchService::noop(),
+    )
+    .unwrap();
+    view.group_by = crate::session::config::GroupByMode::Manual;
+    view.flat_items = view.build_flat_items();
+    // Deliberately the header that is not first: a path-only restore would land on the
+    // other profile's row, which is what this pins.
+    let target = view
+        .flat_items
+        .iter()
+        .position(|i| {
+            matches!(i, Item::Group { path, profile, .. }
+            if path == "work" && profile.as_deref() == Some("first"))
+        })
+        .expect("first profile's work header");
+    assert!(target > 0, "the other profile's header comes earlier");
+    view.cursor = target;
+    view.update_selected();
+    assert_eq!(view.selected_group_profile.as_deref(), Some("first"));
+
+    view.rebuild_flat_items_keeping_cursor();
+
+    assert!(
+        matches!(view.flat_items.get(view.cursor), Some(Item::Group { path, profile, .. })
+            if path == "work" && profile.as_deref() == Some("first")),
+        "cursor stayed on the first profile's header"
+    );
+}
