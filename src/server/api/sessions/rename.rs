@@ -533,6 +533,22 @@ pub async fn rename_session(
     if let Some(warning) = tmux_warning {
         response.warnings.push(warning);
     }
+    if persisted_old_title != title && !is_structured {
+        // After the rekey, so the worker resolves the pane by the name tmux holds now. The
+        // daemon outlives the worker, so parking is all that happens here.
+        let push_profile = profile.to_string();
+        let push_id = id.clone();
+        let push_title = title.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            crate::session::push_renamed_title(&push_profile, &push_id, &push_title)
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|inner| inner)
+        {
+            tracing::warn!(target: "http.api.sessions", session = %id, "agent rename failed after persistence: {error}");
+        }
+    }
 
     (StatusCode::OK, Json(serde_json::json!(response))).into_response()
 }

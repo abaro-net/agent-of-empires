@@ -932,6 +932,25 @@ impl ScratchSmartRenameMode {
     }
 }
 
+/// How far a session's title follows into the agent's own session name. `Launch` puts it on
+/// the launch command line, which the agent reads at its next start; `Live` additionally types
+/// the agent's rename command into a pane that is already running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PushTitleMode {
+    Off,
+    #[default]
+    Launch,
+    Live,
+}
+
+impl PushTitleMode {
+    /// Whether the title rides the launch command line.
+    pub fn on_launch(self) -> bool {
+        matches!(self, Self::Launch | Self::Live)
+    }
+}
+
 /// Session-related configuration defaults
 #[derive(Debug, Clone, Serialize, Deserialize, SettingsSection)]
 // `repo_default = "deny"`: most of this section is personal preference, but
@@ -1085,6 +1104,22 @@ pub struct SessionConfig {
     #[serde(default = "default_true")]
     #[setting(label = "Smart Session Rename", widget = "toggle", category = "Agents")]
     pub smart_rename: bool,
+
+    /// Pass the session's title to the agent as its own display name, so a rename in AoE is
+    /// reflected inside the agent. Applies to agents whose CLI documents a name flag (Claude
+    /// today); a custom command override is left alone, since its argv may be a wrapper.
+    /// `At launch` reaches the agent at the next start or restart. `At launch and while
+    /// running` also types the agent's rename command into a pane that is idle, and holds a
+    /// rename that arrives mid-turn until the turn ends. Typing is opt-in because an idle
+    /// pane can still hold a half-written prompt, which the rename would submit with it.
+    #[serde(default)]
+    #[setting(
+        label = "Push Title To Agent",
+        widget = "select",
+        options = "off:Off,launch:At launch,live:At launch and while running",
+        category = "Agents"
+    )]
+    pub push_title: PushTitleMode,
 
     /// Override Smart Session Rename for scratch sessions specifically, since they have no repo
     /// path to key a per-project override on the way a registered project does.
@@ -1830,6 +1865,7 @@ impl Default for SessionConfig {
             merge_hooks_into_selected_agent: true,
             conversation_summary: false,
             smart_rename: true,
+            push_title: PushTitleMode::default(),
             scratch_smart_rename: ScratchSmartRenameMode::default(),
             smart_rename_agent: String::new(),
             smart_rename_model: HashMap::new(),

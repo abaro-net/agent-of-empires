@@ -30,6 +30,7 @@ use crate::session::capture::{
 };
 mod accessors;
 mod container;
+mod display_name;
 mod execution;
 pub(crate) use execution::{ActiveExecution, CaptureContext, ConversationKey, ConversationState};
 pub use execution::{
@@ -66,6 +67,9 @@ pub(crate) const SESSION_IDENTITY_EXTENSION: &str =
     include_str!("../../../assets/session/aoe-session-id.js");
 
 pub(crate) use accessors::resolved_agent_for;
+pub(crate) use display_name::{
+    maybe_flush_pending_agent_title, push_renamed_title, push_renamed_title_blocking,
+};
 pub use flags::{is_valid_session_color, SessionBucket, StartBlocked, SESSION_COLORS};
 #[cfg(test)]
 pub(crate) use identity_sidecar::FAIL_PI_PATH_WRITES;
@@ -168,6 +172,9 @@ pub struct Instance {
     /// Last title written by the automatic renamer; a manual rename leaves it stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_auto_title: Option<String>,
+    /// A rename that arrived while the agent was mid-turn, waiting for the pane to go idle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_agent_title: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub smart_rename_attempted: bool,
     pub project_path: String,
@@ -353,6 +360,11 @@ pub struct Instance {
     pub(crate) capture_started_at: Option<std::time::SystemTime>,
     #[serde(skip)]
     pi_extension_launched: bool,
+    /// The title the launch line just built carried as the agent's own name. A park holding
+    /// that same title has been delivered by the launch, so `commit_lifecycle_launch` retires
+    /// it; a park holding anything else is a rename that landed after the argv was built.
+    #[serde(skip)]
+    display_name_launched: Option<String>,
     #[serde(skip)]
     identity_publisher_launched: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

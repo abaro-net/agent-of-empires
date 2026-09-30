@@ -90,6 +90,9 @@ pub use instance::{
     SessionGone, StartBlocked, StartOutcome, Status, TerminalInfo, View, WorkspaceInfo,
     WorkspaceRepo, WorktreeInfo, SESSION_COLORS, TMUX_SESSION_GONE_ERROR,
 };
+pub(crate) use instance::{
+    maybe_flush_pending_agent_title, push_renamed_title, push_renamed_title_blocking,
+};
 #[cfg(test)]
 pub(crate) use move_journal::{
     record as record_move_journal, MoveJournalEntry, MOVE_JOURNAL_VERSION,

@@ -1873,6 +1873,24 @@ async fn rename_session(profile: &str, args: RenameArgs) -> Result<()> {
             Ok(Err(error)) => eprintln!("Warning: failed to rename tmux session: {error}"),
             Err(error) => eprintln!("Warning: tmux rename task failed: {error}"),
         }
+        // The agent-side rename takes the instance lifecycle lock, and a detached thread
+        // would not outlive this process, so the locks go first and the send runs here.
+        drop(_lifecycle_lock);
+        drop(_session_title_lock);
+        let push_profile = profile.to_string();
+        let push_id = id.clone();
+        let push_title = committed_title.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::session::push_renamed_title_blocking(&push_profile, &push_id, &push_title)
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                eprintln!("Warning: failed to rename the agent's own session: {error}")
+            }
+            Err(error) => eprintln!("Warning: agent rename task failed: {error}"),
+        }
     }
 
     if args.branch.is_some() {

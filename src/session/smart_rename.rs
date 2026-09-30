@@ -801,6 +801,16 @@ fn apply_terminal_title(
         if let Err(error) = crate::tmux::rekey_session(&id, &old_title, &new_title) {
             tracing::warn!(target: "smart_rename", session = %id, "tmux rename failed: {error}");
         }
+        // The auto-rename is the rename most sessions get, so it carries the title to the
+        // agent too. This process exits next, so the send runs here rather than on a worker,
+        // which means the locks it needs have to go first.
+        drop(_lifecycle_lock);
+        drop(_session_title_lock);
+        if let Err(error) =
+            crate::session::push_renamed_title_blocking(storage.profile(), &id, &new_title)
+        {
+            tracing::warn!(target: "smart_rename", session = %id, "agent rename failed: {error}");
+        }
     }
     Ok(())
 }
@@ -1258,6 +1268,8 @@ mod serve {
             return;
         }
 
+        // No agent-side push here: this path is reached only for structured sessions, which
+        // have no pane to type into. The terminal auto-rename carries it.
         let mut instances = state.instances.write().await;
         if let Some(inst) = instances.iter_mut().find(|i| i.id == id) {
             tracing::info!(target: "smart_rename", session = %id, old = %inst.title, new = %new_title, "auto-renamed session");

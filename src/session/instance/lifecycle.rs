@@ -159,6 +159,14 @@ impl Instance {
             if restart && stored.agent_session_id == self.agent_session_id {
                 stored.resume_probe_failed_sid = self.resume_probe_failed_sid.clone();
             }
+            // A park holding the title this launch carried as the agent's own name has been
+            // delivered, so it must not be typed into the fresh pane as well. A park holding
+            // any other title is a rename that landed after the argv was built, and stands.
+            if self.display_name_launched.is_some()
+                && stored.pending_agent_title == self.display_name_launched
+            {
+                stored.pending_agent_title = None;
+            }
             stored.release_lifecycle_reservation_if_owned(LifecycleOperation::Launch, generation);
             Ok(true)
         })?;

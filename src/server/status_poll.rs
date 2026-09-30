@@ -225,6 +225,14 @@ pub(super) async fn status_poll_loop(state: Arc<AppState>) {
                 if old == Status::Running && inst.status == Status::Idle {
                     crate::session::smart_rename::maybe_spawn_terminal_smart_rename(inst);
                 }
+                // A rename parked while the pane was busy: this is the edge it waited for.
+                // The daemon polls the sessions the TUI does not, so it carries the same
+                // follow-up.
+                if inst.status == Status::Idle
+                    && matches!(old, Status::Running | Status::Waiting | Status::Starting)
+                {
+                    crate::session::maybe_flush_pending_agent_title(inst);
+                }
                 let _ = state.status_tx.send(StatusChange {
                     instance_id: inst.id.clone(),
                     instance_title: inst.title.clone(),

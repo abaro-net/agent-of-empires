@@ -32,10 +32,31 @@ enum PersistGroupDelete {
     Restarting,
 }
 
-fn rekey_tmux_after_persist(id: &str, old_title: &str, new_title: &str) -> Option<String> {
+/// Rename the tmux session and hand the new title to the agent, reporting a tmux warning to
+/// show and whether the title was parked for the agent.
+fn rekey_tmux_after_persist(
+    profile: &str,
+    id: &str,
+    old_title: &str,
+    new_title: &str,
+) -> (Option<String>, bool) {
     if old_title == new_title {
-        return None;
+        return (None, false);
     }
+    let warning = rekey_tmux_session(id, old_title, new_title);
+    // After the rekey: the worker resolves the pane by the name tmux holds now, and this
+    // thread still owns the lifecycle lock the send needs, so only the park happens here.
+    let parked = match crate::session::push_renamed_title(profile, id, new_title) {
+        Ok(parked) => parked,
+        Err(error) => {
+            tracing::warn!(target: "tui.home", session = %id, "agent rename failed after persistence: {error}");
+            false
+        }
+    };
+    (warning, parked)
+}
+
+fn rekey_tmux_session(id: &str, old_title: &str, new_title: &str) -> Option<String> {
     match crate::tmux::rekey_session(id, old_title, new_title) {
         Ok(_) => None,
         Err(error) => {
@@ -1626,8 +1647,16 @@ impl HomeView {
                 )?;
                 self.reload_preserving_profile_move_runtime(std::slice::from_ref(&id))?;
                 drop(_identity_lock);
-                let tmux_warning = rekey_tmux_after_persist(&id, &current_title, &effective_title);
+                let (tmux_warning, parked) =
+                    rekey_tmux_after_persist(target_profile, &id, &current_title, &effective_title);
                 drop(_mutation_guards);
+                // The reload above predates the park, so the row the poller reads would show
+                // nothing waiting and skip the idle edge the send needs.
+                if parked {
+                    if let Some(row) = self.instances.get_mut(&id) {
+                        row.pending_agent_title = Some(effective_title.clone());
+                    }
+                }
                 if let Some(warning) = tmux_warning {
                     self.info_dialog = Some(InfoDialog::new("Rename Saved with Warning", &warning));
                 }
@@ -1647,7 +1676,8 @@ impl HomeView {
                 }
             })?;
             drop(_identity_lock);
-            let tmux_warning = rekey_tmux_after_persist(&id, &current_title, &effective_title);
+            let (tmux_warning, _parked) =
+                rekey_tmux_after_persist(target_profile, &id, &current_title, &effective_title);
             drop(_mutation_guards);
 
             // Rebuild group trees and create group if needed

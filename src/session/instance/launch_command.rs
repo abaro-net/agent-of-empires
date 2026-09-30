@@ -43,6 +43,52 @@ fn apply_yolo_mode(cmd: &mut String, yolo: &crate::agents::YoloMode, is_sandboxe
     }
 }
 
+/// Test seam for the one caller outside this module: the park a launch retires is decided by
+/// whether the flag was actually appended.
+#[cfg(test)]
+pub(super) fn apply_display_name_for_test(
+    cmd: &mut String,
+    agent: Option<&crate::agents::AgentDef>,
+    inst: &mut Instance,
+) {
+    apply_display_name(cmd, agent, inst)
+}
+
+/// Append the agent's display-name flag, so a rename in AoE reaches the agent's own session
+/// name on its next start. Skipped for a command override: the user's argv may be a wrapper
+/// (`ssh -t host claude`), and the flag would land on the wrapper instead of the agent.
+fn apply_display_name(
+    cmd: &mut String,
+    agent: Option<&crate::agents::AgentDef>,
+    inst: &mut Instance,
+) {
+    // Reset first: a launch that skips the flag must not retire a park on the strength of an
+    // earlier one that did not.
+    inst.display_name_launched = None;
+    if inst.has_command_override() {
+        return;
+    }
+    // Read through the instance's own profile: the launch path runs from the CLI, the
+    // daemon and the TUI alike, so a process-wide cache set by one of them would leave the
+    // others silently ignoring the setting.
+    if !inst.push_title_mode().on_launch() {
+        return;
+    }
+    let Some(flag) = agent.and_then(|a| a.supported_display_name_flag()) else {
+        return;
+    };
+    let title = inst.title.trim();
+    // A leading hyphen reads as another flag to the agent's argument parser, which rejects it
+    // and takes the launch down with it; the session keeps the name the agent chooses.
+    if title.is_empty() || title.starts_with('-') {
+        return;
+    }
+    // A title the user typed can carry quotes or spaces, and an unescaped one would also
+    // break `parse_launch_command`, which silently drops the resume flags appended later.
+    cmd.push_str(&format!(" {} {}", flag, shell_escape(title)));
+    inst.display_name_launched = Some(title.to_string());
+}
+
 /// Write the Pi session-id extension into the app dir and return its path.
 pub(super) fn session_identity_extension_path() -> Result<PathBuf> {
     const SOURCE: &str = crate::session::instance::SESSION_IDENTITY_EXTENSION;
@@ -700,6 +746,9 @@ impl Instance {
             }
             let is_existing =
                 self.apply_session_flags(&mut tool_cmd, "sandboxed", agent, execution)?;
+            // After the session flags, so a user-typed value is never in the command they
+            // scan for a session selector, whatever that scan grows into.
+            apply_display_name(&mut tool_cmd, agent, self);
             apply_agent_launch_env(&mut tool_cmd, agent);
 
             let fallback_environment = if execution.is_none() {
@@ -868,6 +917,7 @@ impl Instance {
                     }
                     let is_existing =
                         self.apply_session_flags(&mut cmd, "host agent", agent, execution)?;
+                    apply_display_name(&mut cmd, agent, self);
                     apply_agent_launch_env(&mut cmd, agent);
                     let raw_command = format!("{}{}", env_prefix, cmd);
                     let command = if let Some(plan) = omp_capture_plan.as_ref() {
@@ -904,6 +954,7 @@ impl Instance {
             }
             let is_existing =
                 self.apply_session_flags(&mut cmd, "host custom", agent, execution)?;
+            apply_display_name(&mut cmd, agent, self);
             apply_agent_launch_env(&mut cmd, agent);
             let raw_command = format!("{}{}", env_prefix, cmd);
             let command = if let Some(plan) = omp_capture_plan.as_ref() {
@@ -1308,7 +1359,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn host_command_applies_yolo_resume_and_launch_subcommand() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_home(temp_home.path());
         let mut codex = tool_instance("codex", "/tmp/test");
         codex.yolo_mode = true;
         let cmd = host_command(&mut codex);
@@ -1343,7 +1397,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn host_command_forces_color_only_for_color_sensitive_agents() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_home(temp_home.path());
         for (tool, command, needle, forced) in [
             ("antigravity", "", "agy", true),
             ("antigravity", "agy --some-flag", "agy --some-flag", true),
@@ -2176,6 +2233,228 @@ mod tests {
                 "default"
             )),
             "with no declaration and no environment the default store is the source"
+        );
+    }
+
+    /// A rename in AoE reaches the agent on its next start: the title rides the launch line
+    /// as the agent's own display name, quoted so spaces and apostrophes survive, and a
+    /// command override is left alone because its argv may be a wrapper.
+    #[test]
+    #[serial_test::serial]
+    fn host_command_passes_the_title_as_the_agents_display_name() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_home(temp_home.path());
+        let project = temp_home.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+
+        crate::agents::seed_agent_help_for_test(
+            "claude",
+            "  -n, --name <name>  Set a display name\n",
+        );
+        let mut claude = tool_instance("claude", project.to_str().unwrap());
+        claude.title = "O'Brien's plan".to_string();
+        let cmd = host_command(&mut claude);
+        let expected = format!("--name {}", shell_escape("O'Brien's plan"));
+        assert!(
+            cmd.contains(&expected),
+            "escaped title on the launch line\nwant: {expected}\ngot:  {cmd}"
+        );
+
+        // An agent whose CLI has no verified name flag is untouched.
+        let mut codex = tool_instance("codex", project.to_str().unwrap());
+        codex.title = "plan".to_string();
+        assert!(!host_command(&mut codex).contains("--name"));
+
+        // A command override may be a wrapper; the flag would land on the wrapper.
+        let mut wrapped = tool_instance("claude", project.to_str().unwrap());
+        wrapped.title = "plan".to_string();
+        wrapped.command = "ssh -t host claude".to_string();
+        assert!(!host_command(&mut wrapped).contains("--name"));
+    }
+
+    /// Only `off` keeps the title off the launch line: `live` adds pane typing on top of the
+    /// flag rather than replacing it.
+    #[test]
+    #[serial_test::serial]
+    fn the_launch_line_carries_the_title_unless_push_title_is_off() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_home(temp_home.path());
+        let project = temp_home.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+
+        crate::agents::seed_agent_help_for_test(
+            "claude",
+            "  -n, --name <name>  Set a display name\n",
+        );
+        let mut claude = tool_instance("claude", project.to_str().unwrap());
+        claude.title = "plan".to_string();
+        assert!(
+            host_command(&mut claude).contains("--name"),
+            "the default carries it"
+        );
+
+        for (mode, expected) in [("off", false), ("launch", true), ("live", true)] {
+            let mut config = crate::session::config::profile_config::ProfileConfig::default();
+            config.overrides.insert(
+                "session".to_string(),
+                serde_json::json!({ "push_title": mode }),
+            );
+            crate::session::config::profile_config::save_profile_config(
+                &claude.effective_profile(),
+                &config,
+            )
+            .unwrap();
+            assert_eq!(
+                host_command(&mut claude).contains("--name"),
+                expected,
+                "push_title = {mode}"
+            );
+        }
+    }
+
+    /// The flag is only passed to an install that advertises it. It is recent enough that an
+    /// older build would reject it as an unknown option and exit, which would cost the user
+    /// every session launch rather than just the agent-side name.
+    #[test]
+    #[serial_test::serial]
+    fn an_install_without_the_flag_is_launched_without_it() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_home(temp_home.path());
+        let project = temp_home.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let mut claude = tool_instance("claude", project.to_str().unwrap());
+        claude.title = "plan".to_string();
+        crate::agents::seed_agent_help_for_test("claude", "  -r, --resume [value]  Resume\n");
+        assert!(
+            !host_command(&mut claude).contains("--name"),
+            "a help text with no name flag leaves the launch line alone"
+        );
+
+        crate::agents::seed_agent_help_for_test(
+            "claude",
+            "  -n, --name <name>  Set a display name\n",
+        );
+        assert!(
+            host_command(&mut claude).contains("--name"),
+            "and an install that advertises it gets it"
+        );
+    }
+
+    /// A title that reads as a flag is left off rather than passed: the agent's own parser
+    /// rejects it and the session dies at launch with nothing pointing at the title.
+    #[test]
+    #[serial_test::serial]
+    fn a_flag_shaped_title_stays_off_the_launch_line() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_home(temp_home.path());
+        let project = temp_home.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+
+        crate::agents::seed_agent_help_for_test(
+            "claude",
+            "  -n, --name <name>  Set a display name\n",
+        );
+        let mut claude = tool_instance("claude", project.to_str().unwrap());
+        for (title, passed) in [("wip", true), ("-wip", false), ("--dry-run notes", false)] {
+            claude.title = title.to_string();
+            assert_eq!(
+                host_command(&mut claude).contains("--name"),
+                passed,
+                "title {title:?}"
+            );
+        }
+    }
+
+    /// A command that merely repeats the agent's own binary is not an override, so the host
+    /// path has to name it like any other agent session; the sandboxed path already did.
+    #[test]
+    #[serial_test::serial]
+    fn a_command_equal_to_the_agent_binary_still_gets_the_display_name() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_home(temp_home.path());
+        let project = temp_home.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+
+        crate::agents::seed_agent_help_for_test(
+            "claude",
+            "  -n, --name <name>  Set a display name\n",
+        );
+        let mut claude = tool_instance("claude", project.to_str().unwrap());
+        claude.title = "night shift".to_string();
+        claude.command = "claude".to_string();
+        assert!(
+            !claude.has_command_override(),
+            "the fixture is not an override"
+        );
+        let cmd = host_command(&mut claude);
+        assert!(
+            cmd.contains(&format!("--name {}", shell_escape("night shift"))),
+            "the custom-command branch names it too: {cmd}"
+        );
+    }
+
+    /// The sandboxed branch builds its command by hand, so the display name has to be
+    /// appended there too: a fix in the host builder alone skips every containerized session.
+    #[test]
+    #[serial_test::serial]
+    fn sandboxed_command_carries_the_display_name() {
+        crate::agents::seed_agent_help_for_test(
+            "claude",
+            "  -n, --name <name>  Set a display name\n",
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(&temp.path().join("app"));
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let profile = "sandbox-display-name";
+        super::super::test_helpers::declare_execution_aliases(
+            profile,
+            &[("claude", "claude")],
+            temp.path(),
+        );
+        let mut inst = Instance::new("claude-sandbox", project.to_str().unwrap());
+        inst.tool = "claude".into();
+        inst.command = "claude".into();
+        inst.source_profile = profile.into();
+        inst.title = "night shift".into();
+        inst.sandbox_info = Some(crate::session::SandboxInfo {
+            enabled: true,
+            container_id: None,
+            image: "fixture".into(),
+            container_name: "claude-sandbox".into(),
+            extra_env: None,
+            custom_instruction: None,
+            container_workdir: Some("/workspace/project".into()),
+            before_start_env: Vec::new(),
+        });
+        let config = inst.build_container_config().unwrap();
+        let _transport = super::super::test_helpers::install_container_transport(
+            temp.path(),
+            "claude-sandbox",
+            &config.volumes,
+        );
+        std::fs::copy(
+            temp.path().join("native-bin/prime-agent"),
+            temp.path().join("native-bin/claude"),
+        )
+        .unwrap();
+
+        let command = inst
+            .prepare_launch_command(inst.conversation_state())
+            .unwrap()
+            .command
+            .expect("a sandboxed launch command");
+        // The container argv is nested inside `sh -c`, which re-escapes the quoting, so it is
+        // stripped here to assert adjacency rather than presence somewhere later in the argv.
+        let at = command
+            .find("--name")
+            .unwrap_or_else(|| panic!("no display name in the container argv: {command}"));
+        let tail = command[at + "--name".len()..].trim_start();
+        let value = tail.trim_start_matches(['\'', '\\']);
+        assert!(
+            value.starts_with("night shift"),
+            "the title is the flag's own value, not something later in the argv: {command}"
         );
     }
 }

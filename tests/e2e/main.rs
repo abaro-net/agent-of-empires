@@ -25,6 +25,7 @@ mod claude_shared_project_correlation_e2e;
 mod cli;
 mod cli_session_id_capture;
 mod diagnostics_strip;
+mod display_name_launch;
 mod errors;
 mod filewatch_config_malformed;
 mod filewatch_config_profile_switch;

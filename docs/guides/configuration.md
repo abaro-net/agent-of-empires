@@ -75,6 +75,7 @@ default_tool = "claude"
 yolo_mode_default = false
 agent_status_hooks = true
 smart_rename = true
+push_title = "launch"   # off | launch | live
 auto_stop_idle_secs = 0   # 0 disables; e.g. 7200 = stop after 2h idle
 row_tag = "branch"        # none | auto | profile | sandbox | branch
 sidebar_position = "left" # left | right; TUI session list
@@ -95,6 +96,7 @@ sidebar_position = "left" # left | right; TUI session list
 | `agent_status_hooks` | `true` | Install status-detection hooks into the agent's config; see [Adding a New Agent](../development/adding-agents.md#hook-format-reference). Disabling it leaves status to pane reading but keeps identity hooks used for native resume. |
 | `opencode_preassign_session_id` | `false` | Pre-assign OpenCode's native session id before a host launch (about two seconds per session) so resume captures it. Unsupported for sandboxed OpenCode. |
 | `smart_rename` | `true` | Auto-rename a still-default-named structured session from its first turn, using the session's agent in one-shot mode. Title only; a session you named is never touched. Skipped for agents with no one-shot mode and command-overridden agents. Overridable per project. |
+| `push_title` | `"launch"` | Give the agent the session's title as its own session name, so a rename in AoE shows up inside the agent. `off`, `launch` (the title rides the launch command line, so the agent picks it up at its next start or restart), or `live` (also types the agent's rename command into an idle pane, holding a rename that arrives mid-turn until the turn ends). Only for agents whose CLI documents a name flag (for `launch`) or a rename command (for `live`); Claude is the only one today. Command-overridden, shell and structured sessions are left alone; sandboxed agent sessions get both halves. A title that is empty or begins with `-` is skipped on the launch line, since the agent's own parser would reject it, and the flag is only passed when the host's own `claude --help` advertises it, which stays a host-side check even for a sandboxed session. Note that `live` types into a pane AoE reads as idle, which is not the same as empty: a half-written prompt sitting in the composer is submitted along with the rename. |
 | `smart_rename_agent` | `""` | Agent used for one-shot utility calls (the rename title and the conversation summary). Empty means the session's own agent. A sandboxed session only mounts its own agent's credentials, so a different value makes it ineligible instead of falling back. |
 | `smart_rename_model` | `{}` | Per-agent model for the rename one-shot, e.g. `{ claude = "haiku" }`. An absent key uses the agent's built-in default, an empty value forces the CLI default, and any other value is passed to the agent's model flag. |
 | `inherit_host_environment` | `false` | Forward AoE's whole environment to host sessions. See [Host environment](#host-environment). |

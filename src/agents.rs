@@ -894,6 +894,35 @@ impl AgentDef {
         matches!(self.name, "copilot" | "gemini" | "kimi")
     }
 
+    /// Flag that gives the agent a display name for its own session, so a rename in AoE
+    /// reaches the agent it is managing. Claude documents `-n, --name <name>`; every other
+    /// agent stays `None` until its argv is verified, per `docs/development/adding-agents.md`.
+    /// Declared here, but confirmed against the installed binary by
+    /// [`Self::supported_display_name_flag`] before it reaches a launch line.
+    pub fn display_name_flag(&self) -> Option<&'static str> {
+        match self.name {
+            "claude" => Some("--name"),
+            _ => None,
+        }
+    }
+
+    /// The display-name flag, if this install of the agent advertises it. The flag is recent
+    /// enough that an older build rejects it as an unknown option and exits, which would kill
+    /// every session launch rather than merely leaving the agent unnamed.
+    pub fn supported_display_name_flag(&self) -> Option<&'static str> {
+        let flag = self.display_name_flag()?;
+        agent_help_advertises(self.binary, flag).then_some(flag)
+    }
+
+    /// Slash command that renames the agent's own session from inside a running pane, used
+    /// when a rename happens while the session is live. `{}` takes the new title.
+    pub fn display_name_command(&self) -> Option<&'static str> {
+        match self.name {
+            "claude" => Some("/rename {}"),
+            _ => None,
+        }
+    }
+
     pub fn launch_base_command(&self) -> String {
         match self.launch_subcommand {
             Some(sub) => format!("{} {}", self.binary, sub),
@@ -911,16 +940,16 @@ fn help_advertises_flag(help: &str, flag: &str) -> bool {
     })
 }
 
-/// `pi --help`, cached once it succeeds. A timeout or failure reports no flags for now and is
-/// retried after a cooldown with a longer deadline, since a cold start with many extensions can
-/// outlast the first one.
+/// An agent's `--help`, cached once it succeeds. A timeout or failure reports no flags for now
+/// and is retried after a cooldown with a longer deadline, since a cold start with many
+/// extensions can outlast the first one.
 #[derive(Default)]
-struct PiHelpProbe {
+struct HelpProbe {
     help: Option<String>,
     retry_at: Option<std::time::Instant>,
 }
 
-impl PiHelpProbe {
+impl HelpProbe {
     fn help(
         &mut self,
         clock: impl Fn() -> std::time::Instant,
@@ -944,10 +973,14 @@ impl PiHelpProbe {
     }
 }
 
-fn run_pi_help(timeout: std::time::Duration) -> Option<String> {
-    let agent = get_agent("pi")?;
-    let mut cmd = std::process::Command::new(agent.binary);
+fn run_agent_help(binary: &'static str, timeout: std::time::Duration) -> Option<String> {
+    let mut cmd = std::process::Command::new(binary);
     cmd.arg("--help");
+    // A probe runs a user-configured binary, so it inherits as little as possible: an agent
+    // that reads stdin would hold the pipe until the deadline and delay every launch, and one
+    // that writes a file would drop it wherever the caller happened to be.
+    cmd.stdin(std::process::Stdio::null());
+    cmd.current_dir(std::env::temp_dir());
     crate::process::run_with_timeout(&mut cmd, timeout)
         .ok()
         .flatten()
@@ -955,8 +988,12 @@ fn run_pi_help(timeout: std::time::Duration) -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn run_pi_help(timeout: std::time::Duration) -> Option<String> {
+    run_agent_help(get_agent("pi")?.binary, timeout)
+}
+
 fn pi_help_advertises(flag: &str) -> bool {
-    static PROBE: std::sync::Mutex<PiHelpProbe> = std::sync::Mutex::new(PiHelpProbe {
+    static PROBE: std::sync::Mutex<HelpProbe> = std::sync::Mutex::new(HelpProbe {
         help: None,
         retry_at: None,
     });
@@ -966,6 +1003,45 @@ fn pi_help_advertises(flag: &str) -> bool {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     help_advertises_flag(probe.help(std::time::Instant::now, run_pi_help), flag)
+}
+
+fn agent_help_probes(
+) -> &'static std::sync::Mutex<std::collections::HashMap<&'static str, HelpProbe>> {
+    static PROBES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<&'static str, HelpProbe>>,
+    > = std::sync::OnceLock::new();
+    PROBES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Whether `binary --help` advertises `flag`, cached per binary in the shape of the `pi` probe
+/// above. Used for a flag an older install of an agent would reject outright, where guessing
+/// wrong costs the user the launch.
+fn agent_help_advertises(binary: &'static str, flag: &str) -> bool {
+    let mut probes = agent_help_probes()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let probe = probes.entry(binary).or_default();
+    help_advertises_flag(
+        probe.help(std::time::Instant::now, |timeout| {
+            run_agent_help(binary, timeout)
+        }),
+        flag,
+    )
+}
+
+/// Seed the cache so a test does not depend on the agent being installed.
+#[cfg(test)]
+pub(crate) fn seed_agent_help_for_test(binary: &'static str, help: &str) {
+    let mut probes = agent_help_probes()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    probes.insert(
+        binary,
+        HelpProbe {
+            help: Some(help.to_string()),
+            retry_at: None,
+        },
+    );
 }
 
 pub(crate) fn pi_supports_extension_flag() -> bool {
@@ -1315,7 +1391,7 @@ mod tests {
         let help = "  --session-id <id>\n  --extension, -e <path>\n";
         let start = std::time::Instant::now();
         let now = std::cell::Cell::new(start);
-        let mut probe = PiHelpProbe::default();
+        let mut probe = HelpProbe::default();
         let mut timeouts = Vec::new();
 
         // The first probe runs to its deadline before failing.

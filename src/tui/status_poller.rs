@@ -276,6 +276,17 @@ fn project_status_updates(
             if prev_status == Status::Running && inst.status == Status::Idle {
                 crate::session::smart_rename::maybe_spawn_terminal_smart_rename(&inst);
             }
+            // A rename parked while the pane was busy: this is the edge it waited for. Every
+            // state that precedes a settled pane qualifies, including a prompt the agent was
+            // holding, which is answered by the time it goes idle.
+            if inst.status == Status::Idle
+                && matches!(
+                    prev_status,
+                    Status::Running | Status::Waiting | Status::Starting
+                )
+            {
+                crate::session::maybe_flush_pending_agent_title(&inst);
+            }
 
             Some(StatusUpdate {
                 id: inst.id,
