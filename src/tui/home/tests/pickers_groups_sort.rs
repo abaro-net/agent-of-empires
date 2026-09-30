@@ -1614,12 +1614,17 @@ fn test_o_key_flat_items_follow_sort_order() {
         assert_eq!(work_group_titles(&env.view), expected);
     }
 
-    // Newest -> Attention -> LastActivity -> Oldest -> AZ -> ZA -> Newest.
+    // With the picker open a mnemonic applies its order outright, no arrow keys.
     let mut env = create_test_env_with_mixed_sessions();
-    for _ in 0..6 {
+    for (letter, expected) in [
+        ('c', SortOrder::Custom),
+        ('t', SortOrder::Attention),
+        ('n', SortOrder::Newest),
+    ] {
         env.view.handle_key(key(KeyCode::Char('o')), None);
+        env.view.handle_key(key(KeyCode::Char(letter)), None);
+        assert_eq!(env.view.sort_order, expected, "{letter}");
     }
-    assert_eq!(env.view.sort_order, SortOrder::Newest);
     assert_eq!(work_group_titles(&env.view), ["Apple", "Mango", "Zebra"]);
 }
 
@@ -1680,4 +1685,385 @@ fn test_all_profiles_view_loads_from_multiple_profiles() {
     assert_eq!(view.instances().len(), 1);
     assert_eq!(view.instance_at(0).title, "Alpha Session");
     assert_eq!(view.instance_at(0).source_profile, "alpha");
+}
+
+/// Ctrl+Down and Ctrl+Up move a session within its group under the Custom sort, and the move
+/// survives a rebuild because it is stored on the session rather than recomputed.
+#[test]
+#[serial]
+fn test_ctrl_arrows_move_a_session_under_custom_sort() {
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+    // Set the order directly: `o` cycles from whatever the previous serial test persisted.
+    env.view.apply_sort_order(SortOrder::Custom);
+    let original: Vec<String> = work_group_titles(&env.view)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(original.len(), 3);
+
+    // Land the cursor on the first session of the work group.
+    let work_ids: Vec<String> = env
+        .view
+        .flat_items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Session { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .filter(|id| {
+            env.view
+                .get_instance(id)
+                .map(|s| s.group_path == "work")
+                .unwrap_or(false)
+        })
+        .collect();
+    let first = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Session { id, .. } if id == &work_ids[0]))
+        .expect("a session under work");
+    env.view.cursor = first;
+    env.view.update_selected();
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+    let moved: Vec<String> = work_group_titles(&env.view)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        moved,
+        [
+            original[1].clone(),
+            original[0].clone(),
+            original[2].clone()
+        ]
+    );
+
+    env.view.rebuild_flat_items();
+    assert_eq!(
+        work_group_titles(&env.view),
+        moved,
+        "order is persisted, not recomputed"
+    );
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), None);
+    assert_eq!(work_group_titles(&env.view), original);
+}
+
+/// Outside the Custom sort the same keys leave the list alone: a computed order would
+/// discard the move on the next rebuild, so the action explains itself instead.
+#[test]
+#[serial]
+fn test_ctrl_arrows_do_not_reorder_under_a_computed_sort() {
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.apply_sort_order(SortOrder::Newest);
+    let before: Vec<String> = work_group_titles(&env.view)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+    let work_ids: Vec<String> = env
+        .view
+        .flat_items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Session { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .filter(|id| {
+            env.view
+                .get_instance(id)
+                .map(|s| s.group_path == "work")
+                .unwrap_or(false)
+        })
+        .collect();
+    let first = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Session { id, .. } if id == &work_ids[0]))
+        .expect("a session under work");
+    env.view.cursor = first;
+    env.view.update_selected();
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+
+    assert_eq!(work_group_titles(&env.view), before);
+    assert!(
+        env.view.status_flash.is_some(),
+        "the user is told why nothing moved"
+    );
+}
+
+/// Alt+Down and Alt+Up walk the sessions the theme paints as attention-worthy: `Running`
+/// (green) and the ones that just finished a turn (Idle inside the decay window). A session
+/// that went idle long ago is skipped.
+#[test]
+#[serial]
+fn test_alt_arrows_jump_between_just_finished_sessions() {
+    use crate::session::Status;
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.idle_decay_window = std::time::Duration::from_secs(30 * 60);
+    let ids: Vec<String> = env
+        .view
+        .flat_items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Session { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(ids.len() >= 3);
+
+    // One finished a minute ago and one is working; the one between them went idle yesterday.
+    let fresh = Utc::now() - ChronoDuration::minutes(1);
+    let stale = Utc::now() - ChronoDuration::days(1);
+    for (idx, status, entered) in [
+        (0, Status::Idle, Some(fresh)),
+        (1, Status::Idle, Some(stale)),
+        (2, Status::Running, None),
+    ] {
+        env.view
+            .apply_user_action(&ids[idx], |inst| {
+                inst.status = status;
+                inst.idle_entered_at = entered;
+            })
+            .unwrap();
+    }
+    env.view.rebuild_flat_items();
+    env.view.cursor = 0;
+    env.view.update_selected();
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT), None);
+    assert_eq!(
+        env.view.selected_session,
+        Some(ids[2].clone()),
+        "walked past the stale row onto the working one"
+    );
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT), None);
+    assert_ne!(
+        env.view.selected_session,
+        Some(ids[1].clone()),
+        "the session idle since yesterday is skipped"
+    );
+}
+
+/// A session at the edge of its group keeps going into the neighbouring group, landing
+/// against the boundary it crossed rather than at a far end.
+#[test]
+#[serial]
+fn test_ctrl_arrows_carry_a_session_into_the_next_group() {
+    use crate::session::config::SortOrder;
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.apply_sort_order(SortOrder::Custom);
+
+    let work_ids: Vec<String> = env
+        .view
+        .flat_items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Session { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .filter(|id| {
+            env.view
+                .get_instance(id)
+                .map(|s| s.group_path == "work")
+                .unwrap_or(false)
+        })
+        .collect();
+    assert!(work_ids.len() >= 2, "the fixture groups several sessions");
+    let top = work_ids[0].clone();
+
+    let cursor = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Session { id, .. } if id == &top))
+        .expect("the work group's first session");
+    env.view.cursor = cursor;
+    env.view.update_selected();
+
+    // Above "work" sits the ungrouped bucket, so moving up leaves the group.
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), None);
+    assert_eq!(
+        env.view.get_instance(&top).map(|i| i.group_path.clone()),
+        Some(String::new()),
+        "the session left its group"
+    );
+
+    // And back again, landing at the top of the group it re-enters.
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+    assert_eq!(
+        env.view.get_instance(&top).map(|i| i.group_path.clone()),
+        Some("work".to_string())
+    );
+    assert_eq!(
+        env.view.get_instance(&top).and_then(|i| i.sort_index),
+        Some(0),
+        "it re-enters at the boundary it crossed"
+    );
+}
+
+/// Ctrl+Down on a group header moves that group past its sibling, and the new order is what
+/// the list shows on the next rebuild.
+#[test]
+#[serial]
+fn test_ctrl_arrows_move_a_group_among_its_siblings() {
+    use crate::session::config::SortOrder;
+
+    let instances = [
+        instance_in("a1", "/tmp/a1", "alpha"),
+        instance_in("b1", "/tmp/b1", "beta"),
+        instance_in("c1", "/tmp/c1", "gamma"),
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    env.view.apply_sort_order(SortOrder::Custom);
+
+    let group_names = |view: &HomeView| -> Vec<String> {
+        view.flat_items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Group { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let before = group_names(&env.view);
+    assert_eq!(before, ["alpha", "beta", "gamma"], "fixture order");
+
+    let header = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Group { name, .. } if name == "alpha"))
+        .expect("alpha header");
+    env.view.cursor = header;
+    env.view.update_selected();
+    assert_eq!(env.view.selected_group.as_deref(), Some("alpha"));
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+    assert_eq!(group_names(&env.view), ["beta", "alpha", "gamma"]);
+
+    env.view.rebuild_flat_items();
+    assert_eq!(
+        group_names(&env.view),
+        ["beta", "alpha", "gamma"],
+        "persisted"
+    );
+}
+
+/// The last row of the last group has nowhere to go: Archived and Trash are sinks a session
+/// reaches by being archived or trashed, never by being moved into them.
+#[test]
+#[serial]
+fn test_ctrl_down_stops_at_the_last_group() {
+    use crate::session::config::SortOrder;
+
+    let mut archived = instance_in("gone", "/tmp/gone", "alpha");
+    archived.archive();
+    let instances = [
+        instance_in("a1", "/tmp/a1", "alpha"),
+        instance_in("b1", "/tmp/b1", "beta"),
+        archived,
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    env.view.apply_sort_order(SortOrder::Custom);
+    assert!(
+        env.view
+            .flat_items
+            .iter()
+            .any(|i| matches!(i, Item::Group { name, .. } if name.contains("Archived"))),
+        "the fixture shows an Archived section to move into"
+    );
+
+    let last = env
+        .view
+        .flat_items
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, i)| match i {
+            Item::Session { id, .. } => env
+                .view
+                .get_instance(id)
+                .filter(|inst| inst.title == "b1")
+                .map(|_| (idx, id.clone())),
+            _ => None,
+        })
+        .next()
+        .expect("b1 row");
+    env.view.cursor = last.0;
+    env.view.update_selected();
+
+    for _ in 0..3 {
+        env.view
+            .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+    }
+
+    assert_eq!(
+        env.view.get_instance(&last.1).map(|i| i.group_path.clone()),
+        Some("beta".to_string()),
+        "stayed in the last real group"
+    );
+}
+
+/// Inside a session the relay swallows every key until the exit chord, except the jump
+/// keys: they mean "take me elsewhere", so they leave live mode and land on the next
+/// working or just-finished session.
+#[test]
+#[serial]
+fn test_alt_arrows_leave_live_send_before_jumping() {
+    use crate::session::Status;
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.idle_decay_window = std::time::Duration::from_secs(30 * 60);
+    let ids: Vec<String> = env
+        .view
+        .flat_items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Session { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(ids.len() >= 3);
+
+    env.view
+        .apply_user_action(&ids[2], |inst| {
+            inst.status = Status::Idle;
+            inst.idle_entered_at = Some(Utc::now() - ChronoDuration::minutes(1));
+        })
+        .unwrap();
+    env.view.rebuild_flat_items();
+    env.view.cursor = 0;
+    env.view.update_selected();
+    env.view.live_send = Some(live_send_state(&ids[0], "relaying", "aoe_test_live_jump"));
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT), None);
+
+    assert!(env.view.live_send.is_none(), "left the relay");
+    assert_eq!(
+        env.view.selected_session,
+        Some(ids[2].clone()),
+        "and landed on the just-finished session"
+    );
 }
