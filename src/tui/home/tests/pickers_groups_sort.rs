@@ -2067,3 +2067,98 @@ fn test_alt_arrows_leave_live_send_before_jumping() {
         "and landed on the just-finished session"
     );
 }
+
+/// Project and Org headers are derived from repo paths, and their rows carry a rewritten
+/// `group_path` for display. A move there would persist a manual membership the list is not
+/// showing, so it is refused and the stored groups stay put.
+#[test]
+#[serial]
+fn test_row_moves_are_refused_outside_manual_grouping() {
+    use crate::session::config::{GroupByMode, SortOrder};
+
+    let instances = [
+        instance_in("a1", "/tmp/alpha", "work"),
+        instance_in("b1", "/tmp/beta", "work"),
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    env.view.apply_sort_order(SortOrder::Custom);
+    env.view.group_by = GroupByMode::Project;
+    env.view.rebuild_flat_items();
+
+    let first = env
+        .view
+        .flat_items
+        .iter()
+        .enumerate()
+        .find_map(|(idx, i)| match i {
+            Item::Session { id, .. } => Some((idx, id.clone())),
+            _ => None,
+        })
+        .expect("a session row");
+    let membership = |view: &HomeView| -> Vec<String> {
+        let (instances, _) = Storage::open_unwatched("test")
+            .unwrap()
+            .load_with_groups()
+            .unwrap();
+        let _ = view;
+        instances
+            .iter()
+            .map(|i| format!("{}={}", i.title, i.group_path))
+            .collect()
+    };
+    let before = membership(&env.view);
+    env.view.cursor = first.0;
+    env.view.update_selected();
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+
+    assert_eq!(
+        membership(&env.view),
+        before,
+        "manual group membership untouched"
+    );
+    assert!(env.view.status_flash.is_some(), "the refusal is explained");
+}
+
+/// A group that exists only because a session names it has no `groups.json` row yet. Moving
+/// it must still persist the new order, or the next load rebuilds the original one.
+#[test]
+#[serial]
+fn test_moving_a_group_without_a_stored_row_persists() {
+    use crate::session::config::SortOrder;
+
+    let instances = [
+        instance_in("a1", "/tmp/a1", "alpha"),
+        instance_in("b1", "/tmp/b1", "beta"),
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    // The seeder writes a row per group; drop them so the groups exist only through the
+    // sessions that name them, which is what the group PATCH endpoint leaves behind.
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|_, groups| {
+            groups.clear();
+            Ok(())
+        })
+        .unwrap();
+    env.view.apply_sort_order(SortOrder::Custom);
+
+    let header = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Group { name, .. } if name == "alpha"))
+        .expect("alpha header");
+    env.view.cursor = header;
+    env.view.update_selected();
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+
+    let (_, stored) = Storage::open_unwatched("test")
+        .unwrap()
+        .load_with_groups()
+        .unwrap();
+    let paths: Vec<String> = stored.into_iter().map(|g| g.path).collect();
+    assert_eq!(paths, ["beta", "alpha"], "permutation reached the store");
+}

@@ -3827,7 +3827,11 @@ impl HomeView {
             let id = id.clone();
             let window = self.idle_decay_window;
             let stop_here = self.get_instance(&id).is_some_and(|inst| {
-                inst.status == Status::Running || inst.idle_age().is_some_and(|age| age < window)
+                // Snoozed, archived and trashed rows are explicit "don't bother me" states,
+                // excluded here as they are in `w`.
+                !inst.is_dismissed()
+                    && (inst.status == Status::Running
+                        || inst.idle_age().is_some_and(|age| age < window))
             });
             if stop_here {
                 self.jump_to_session_id(&id);

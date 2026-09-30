@@ -376,11 +376,23 @@ pub fn label(id: ActionId, strict: bool) -> String {
 }
 
 fn format_chord(c: &Chord) -> String {
-    match c.code {
-        KeyCode::Char(ch) if c.ctrl => format!("Ctrl+{}", ch.to_ascii_uppercase()),
-        KeyCode::Char(ch) => ch.to_string(),
+    let key = match c.code {
+        KeyCode::Char(ch) => ch.to_ascii_uppercase().to_string(),
         KeyCode::F(n) => format!("F{n}"),
-        _ => String::new(),
+        KeyCode::Up => "Up".to_string(),
+        KeyCode::Down => "Down".to_string(),
+        KeyCode::Left => "Left".to_string(),
+        KeyCode::Right => "Right".to_string(),
+        _ => return String::new(),
+    };
+    // A bare letter keeps its lone-character form; every modified chord is spelled out, or
+    // the help overlay and the palette show the new arrow bindings with no key at all.
+    match (c.ctrl, c.alt, c.code) {
+        (false, false, KeyCode::Char(ch)) => ch.to_string(),
+        (true, true, _) => format!("Ctrl+Alt+{key}"),
+        (true, false, _) => format!("Ctrl+{key}"),
+        (false, true, _) => format!("Alt+{key}"),
+        (false, false, _) => key,
     }
 }
 
@@ -1377,5 +1389,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Modified chords spell out their key: without this the arrow bindings reach help and
+    /// the palette with an empty label, which is how they were invisible when first added.
+    #[test]
+    fn modified_chords_render_a_visible_key_label() {
+        for (id, expected) in [
+            (ActionId::MoveRowUp, "Ctrl+Up"),
+            (ActionId::MoveRowDown, "Ctrl+Down"),
+            (ActionId::JumpPrevFinished, "Alt+Up"),
+            (ActionId::JumpNextFinished, "Alt+Down"),
+        ] {
+            for strict in [false, true] {
+                assert_eq!(label(id, strict), expected, "{id:?} strict={strict}");
+            }
+        }
+        assert_eq!(label(ActionId::ToggleFavorite, false), "f");
     }
 }

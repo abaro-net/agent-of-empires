@@ -772,7 +772,11 @@ pub fn flatten_tree_all_profiles(
 
     // Collect and flatten groups from all profiles at depth 0
     let mut all_roots: Vec<(&str, &Group, Vec<Instance>)> = Vec::new();
-    for (profile_name, tree) in group_trees {
+    // Iterating the map directly would order the profile blocks differently on every rebuild
+    // under Custom, which keeps whatever order it is handed.
+    let mut profiles: Vec<(&String, &GroupTree)> = group_trees.iter().collect();
+    profiles.sort_by(|a, b| a.0.cmp(b.0));
+    for (profile_name, tree) in profiles {
         let profile_instances: Vec<Instance> = instances
             .iter()
             .filter(|i| i.source_profile == *profile_name)
