@@ -77,8 +77,19 @@ fn test_tui_custom_sort_reorders_and_persists() {
         "the rows swapped"
     );
 
-    // The order lives on the sessions themselves, not in the running TUI, so the next
-    // start reads it back: both rows carry the index the move assigned.
+    // A fresh TUI reads the order back from disk: this is the claim the feature makes, and
+    // asserting only on the stored indices would not test it.
+    h.kill_tui();
+    h.spawn_tui();
+    h.wait_for("alpha-one");
+    h.wait_for("beta-two");
+    assert_eq!(
+        order_on_screen(&h),
+        moved,
+        "a restarted TUI shows the moved order"
+    );
+
+    // And the indices themselves are what the move assigned.
     let rows: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(h.sessions_path()).expect("read sessions.json"),
     )

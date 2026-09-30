@@ -2268,3 +2268,166 @@ fn test_cursor_restore_keeps_the_group_profile() {
         "cursor stayed on the first profile's header"
     );
 }
+
+/// A single-profile view leaves a header's profile unset. An empty or collapsed neighbour is
+/// still a destination: skipping it would carry the session past it into the group beyond.
+#[test]
+#[serial]
+fn test_cross_group_move_lands_in_an_empty_neighbour() {
+    use crate::session::config::SortOrder;
+
+    let instances = [
+        instance_in("a1", "/tmp/a1", "alpha"),
+        instance_in("c1", "/tmp/c1", "gamma"),
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    // "beta" sits between them with no sessions of its own.
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|_, groups| {
+            groups.insert(
+                1,
+                crate::session::Group {
+                    name: "beta".to_string(),
+                    path: "beta".to_string(),
+                    collapsed: true,
+                    archived_at: None,
+                    children: Vec::new(),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+    env.view.reload_storage_only().unwrap();
+    env.view.apply_sort_order(SortOrder::Custom);
+
+    let moving = env
+        .view
+        .flat_items
+        .iter()
+        .find_map(|i| match i {
+            Item::Session { id, .. } => env
+                .view
+                .get_instance(id)
+                .filter(|inst| inst.title == "a1")
+                .map(|_| id.clone()),
+            _ => None,
+        })
+        .expect("a1 row");
+    let at = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Session { id, .. } if *id == moving))
+        .expect("row index");
+    env.view.cursor = at;
+    env.view.update_selected();
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+
+    assert_eq!(
+        env.view.get_instance(&moving).map(|i| i.group_path.clone()),
+        Some("beta".to_string()),
+        "landed in the adjacent group, not past it"
+    );
+    // The destination was collapsed; the row it received has to stay visible, or the cursor
+    // cannot follow it and the next move acts on a hidden session.
+    assert!(
+        env.view
+            .flat_items
+            .iter()
+            .any(|i| matches!(i, Item::Session { id, .. } if *id == moving)),
+        "the moved row is on screen"
+    );
+    assert_eq!(env.view.selected_session.as_deref(), Some(moving.as_str()));
+    assert!(
+        matches!(env.view.flat_items.get(env.view.cursor), Some(Item::Session { id, .. }) if *id == moving),
+        "and the cursor sits on it"
+    );
+}
+
+/// A peer reorders the same group between this view's read and its write. Computing the
+/// permutation from the locked rows keeps the indices a permutation of 0..n; computing it
+/// from a stale snapshot leaves two rows sharing one.
+#[test]
+#[serial]
+fn test_a_peer_swap_does_not_leave_duplicate_indices() {
+    use crate::session::config::SortOrder;
+
+    let instances = [
+        instance_in("a1", "/tmp/a1", "work"),
+        instance_in("b1", "/tmp/b1", "work"),
+        instance_in("c1", "/tmp/c1", "work"),
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    env.view.apply_sort_order(SortOrder::Custom);
+
+    let by_title = |view: &HomeView, title: &str| -> String {
+        view.flat_items
+            .iter()
+            .find_map(|i| match i {
+                Item::Session { id, .. } => view
+                    .get_instance(id)
+                    .filter(|inst| inst.title == title)
+                    .map(|_| id.clone()),
+                _ => None,
+            })
+            .expect("session by title")
+    };
+    let (a, b, c) = (
+        by_title(&env.view, "a1"),
+        by_title(&env.view, "b1"),
+        by_title(&env.view, "c1"),
+    );
+
+    // Seed 0/1/2, which is what the view has read.
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|rows, _| {
+            for (id, index) in [(&a, 0u32), (&b, 1), (&c, 2)] {
+                if let Some(row) = rows.iter_mut().find(|r| r.id == *id) {
+                    row.sort_index = Some(index);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    env.view.reload_storage_only().unwrap();
+
+    // A peer swaps b and c behind this view's back; the view still believes 0/1/2.
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|rows, _| {
+            for (id, index) in [(&b, 2u32), (&c, 1)] {
+                if let Some(row) = rows.iter_mut().find(|r| r.id == *id) {
+                    row.sort_index = Some(index);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let at = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Session { id, .. } if *id == a))
+        .expect("a1 row");
+    env.view.cursor = at;
+    env.view.update_selected();
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+
+    let (rows, _) = Storage::open_unwatched("test")
+        .unwrap()
+        .load_with_groups()
+        .unwrap();
+    let mut indices: Vec<u32> = rows.iter().filter_map(|r| r.sort_index).collect();
+    indices.sort_unstable();
+    assert_eq!(
+        indices,
+        vec![0, 1, 2],
+        "indices stay a permutation: {indices:?}"
+    );
+}

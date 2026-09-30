@@ -31,69 +31,117 @@ impl HomeView {
         Ok(())
     }
 
-    /// Sessions that share `id`'s group and profile, in the order the list shows them.
-    fn custom_siblings(&self, id: &str) -> Vec<String> {
-        let Some(anchor) = self.instances.get(id) else {
-            return Vec::new();
-        };
-        let mut siblings: Vec<&Instance> = self
-            .instances
-            .values()
-            .filter(|i| {
-                i.group_path == anchor.group_path
-                    && i.source_profile == anchor.source_profile
-                    && !i.is_archived()
-                    && !i.is_trashed()
-            })
-            .collect();
-        siblings.sort_by_key(|i| {
-            (
-                i.sort_index.unwrap_or(u32::MAX),
-                std::cmp::Reverse(i.created_at),
-            )
-        });
-        siblings.iter().map(|i| i.id.clone()).collect()
-    }
-
     fn move_session_row(&mut self, id: &str, delta: isize) -> anyhow::Result<()> {
-        let mut order = self.custom_siblings(id);
-        let Some(from) = order.iter().position(|s| s == id) else {
+        if self.apply_move(id, delta, None)? {
+            self.rebuild_flat_items_keeping_cursor();
             return Ok(());
-        };
-        let Some(to) = from.checked_add_signed(delta).filter(|t| *t < order.len()) else {
-            // Off the end of its own group: carry on into the neighbouring one.
-            return self.move_session_across_groups(id, delta);
-        };
-        order.swap(from, to);
-        self.renumber(&order, None)?;
-        self.rebuild_flat_items_keeping_cursor();
-        Ok(())
+        }
+        // Already at the edge of its own group: carry on into the neighbouring one.
+        self.move_session_across_groups(id, delta)
     }
 
-    /// Write a sibling set's positions in one locked update, optionally moving `regroup`'s
-    /// session into another group in the same transaction. A per-row write would leave a
-    /// half-applied order behind when one of them failed.
-    fn renumber(
+    /// Move `id` by `delta` inside its group, or into `target_group` when crossing a
+    /// boundary, and renumber the whole destination sibling set — all computed from the rows
+    /// the store holds under the lock. Reading the order beforehand and writing a diff lets a
+    /// peer's concurrent swap survive alongside this one, leaving two rows sharing an index.
+    fn apply_move(
         &mut self,
-        order: &[String],
-        regroup: Option<(&str, String)>,
-    ) -> anyhow::Result<()> {
-        let positions: HashMap<String, u32> = order
-            .iter()
-            .enumerate()
-            .map(|(position, id)| (id.clone(), position as u32))
-            .collect();
-        let moved = regroup.map(|(id, group)| (id.to_string(), group));
-        self.bulk_apply_user_action(order, move |inst| {
-            if let Some(position) = positions.get(&inst.id) {
-                inst.sort_index = Some(*position);
-            }
-            if let Some((id, group)) = &moved {
-                if inst.id == *id {
-                    inst.group_path = group.clone();
+        id: &str,
+        delta: isize,
+        target_group: Option<String>,
+    ) -> anyhow::Result<bool> {
+        let Some(anchor) = self.instances.get(id) else {
+            return Ok(false);
+        };
+        let profile = anchor.source_profile.clone();
+        let source_group = anchor.group_path.clone();
+        let Some(storage) = self.storages.get(&profile) else {
+            return Ok(false);
+        };
+
+        let moved: Vec<(String, u32, Option<String>)> = storage.update(|instances, _groups| {
+            let group = target_group.clone().unwrap_or_else(|| source_group.clone());
+            let mut siblings: Vec<&Instance> = instances
+                .iter()
+                .filter(|i| {
+                    i.group_path == group
+                        && i.source_profile == profile
+                        && !i.is_archived()
+                        && !i.is_trashed()
+                        && i.id != id
+                })
+                .collect();
+            siblings.sort_by_key(|i| {
+                (
+                    i.sort_index.unwrap_or(u32::MAX),
+                    std::cmp::Reverse(i.created_at),
+                )
+            });
+            let mut order: Vec<String> = siblings.iter().map(|i| i.id.to_string()).collect();
+
+            match &target_group {
+                // Crossing a boundary: land against the edge that was crossed.
+                Some(_) if delta < 0 => order.push(id.to_string()),
+                Some(_) => order.insert(0, id.to_string()),
+                None => {
+                    // Within the group, the anchor's own position is read under the lock too.
+                    let mut own = instances
+                        .iter()
+                        .filter(|i| {
+                            i.group_path == group
+                                && i.source_profile == profile
+                                && !i.is_archived()
+                                && !i.is_trashed()
+                        })
+                        .collect::<Vec<_>>();
+                    own.sort_by_key(|i| {
+                        (
+                            i.sort_index.unwrap_or(u32::MAX),
+                            std::cmp::Reverse(i.created_at),
+                        )
+                    });
+                    let Some(at) = own.iter().position(|i| i.id == id) else {
+                        return Ok(Vec::new());
+                    };
+                    let Some(to) = at.checked_add_signed(delta).filter(|t| *t < own.len()) else {
+                        return Ok(Vec::new());
+                    };
+                    order = own.iter().map(|i| i.id.to_string()).collect();
+                    order.swap(at, to);
                 }
             }
-        })
+
+            let mut applied = Vec::with_capacity(order.len());
+            for (position, sibling) in order.iter().enumerate() {
+                let position = position as u32;
+                if let Some(row) = instances.iter_mut().find(|i| i.id == *sibling) {
+                    row.sort_index = Some(position);
+                    if row.id == id {
+                        if let Some(group) = &target_group {
+                            row.group_path = group.clone();
+                        }
+                    }
+                    applied.push((row.id.clone(), position, target_group.clone()));
+                }
+            }
+            Ok(applied)
+        })?;
+
+        if moved.is_empty() {
+            return Ok(false);
+        }
+        // Reconcile the view with what the store now holds.
+        for (row_id, position, group) in &moved {
+            if let Some(row) = self.instances.get_mut(row_id) {
+                row.sort_index = Some(*position);
+                if row_id == id {
+                    if let Some(group) = group {
+                        row.group_path = group.clone();
+                    }
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Group paths in the order the list shows them, restricted to `profile`, including the
@@ -109,10 +157,15 @@ impl HomeView {
                     profile: row_profile,
                     ..
                 } => {
-                    if profile.is_some() && row_profile.as_deref() != profile {
-                        continue;
+                    // Single-profile flattening leaves a header's profile unset, so an
+                    // unqualified row belongs to the view's only profile; comparing it
+                    // against `Some(profile)` would drop every header and leave only the
+                    // groups recovered from visible sessions, skipping empty or collapsed
+                    // neighbours.
+                    match (profile, row_profile.as_deref()) {
+                        (Some(want), Some(have)) if want != have => continue,
+                        _ => path.clone(),
                     }
-                    path.clone()
                 }
                 Item::Session { id, .. } => match self.get_instance(id) {
                     Some(inst)
@@ -161,38 +214,56 @@ impl HomeView {
             return Ok(());
         };
 
-        let mut order: Vec<String> = self
-            .instances
-            .values()
-            .filter(|i| {
-                i.group_path == target
-                    && i.source_profile == profile
-                    && i.id != id
-                    && !i.is_archived()
-                    && !i.is_trashed()
-            })
-            .collect::<Vec<_>>()
-            .iter()
-            .map(|i| i.id.clone())
-            .collect();
-        order.sort_by_key(|sibling| {
-            self.instances
-                .get(sibling)
-                .map(|i| {
-                    (
-                        i.sort_index.unwrap_or(u32::MAX),
-                        std::cmp::Reverse(i.created_at),
-                    )
-                })
-                .unwrap_or((u32::MAX, std::cmp::Reverse(chrono::Utc::now())))
-        });
-        if delta < 0 {
-            order.push(id.to_string());
-        } else {
-            order.insert(0, id.to_string());
+        if !self.apply_move(id, delta, Some(target.clone()))? {
+            return Ok(());
         }
-        self.renumber(&order, Some((id, target)))?;
+        // A collapsed destination would hide the row it just received: the cursor could not
+        // follow it, and the next move would act on a session that is no longer on screen.
+        self.reveal_group(&profile, &target)?;
         self.rebuild_flat_items_keeping_cursor();
+        Ok(())
+    }
+
+    /// Expand `path` and its ancestors so a row moved into them stays visible.
+    fn reveal_group(&mut self, profile: &str, path: &str) -> anyhow::Result<()> {
+        let mut wanted: Vec<String> = Vec::new();
+        let mut walk = path;
+        loop {
+            wanted.push(walk.to_string());
+            match walk.rsplit_once('/') {
+                Some((parent, _)) if !parent.is_empty() => walk = parent,
+                _ => break,
+            }
+        }
+        let collapsed_now: Vec<String> = self
+            .group_trees
+            .get(profile)
+            .map(|tree| {
+                tree.get_all_groups()
+                    .into_iter()
+                    .filter(|g| g.collapsed && wanted.contains(&g.path))
+                    .map(|g| g.path)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if collapsed_now.is_empty() {
+            return Ok(());
+        }
+        if let Some(storage) = self.storages.get(profile) {
+            storage.update(|_instances, groups| {
+                for group in groups.iter_mut() {
+                    if collapsed_now.contains(&group.path) {
+                        group.collapsed = false;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        if let Some(tree) = self.group_trees.get_mut(profile) {
+            for path in &collapsed_now {
+                tree.set_collapsed(path, false);
+            }
+        }
         Ok(())
     }
 
