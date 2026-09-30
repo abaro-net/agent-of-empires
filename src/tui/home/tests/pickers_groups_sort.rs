@@ -2431,3 +2431,252 @@ fn test_a_peer_swap_does_not_leave_duplicate_indices() {
         "indices stay a permutation: {indices:?}"
     );
 }
+
+/// Session id of the row titled `title`.
+fn custom_order_id_of(view: &HomeView, title: &str) -> String {
+    view.flat_items
+        .iter()
+        .find_map(|i| match i {
+            Item::Session { id, .. } => view
+                .get_instance(id)
+                .filter(|inst| inst.title == title)
+                .map(|_| id.clone()),
+            _ => None,
+        })
+        .expect("session by title")
+}
+
+/// A peer deletes the group the cursor is about to move into, between this view's read and
+/// its write. The destination is checked against the locked rows, so the move is dropped:
+/// writing the membership blind would make the next tree rebuild synthesize the group back
+/// from its new member and undo the deletion.
+#[test]
+#[serial]
+fn test_a_move_does_not_resurrect_a_group_a_peer_deleted() {
+    use crate::session::config::SortOrder;
+
+    let instances = [
+        instance_in("a1", "/tmp/a1", "aaa"),
+        instance_in("b1", "/tmp/b1", "bbb"),
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    env.view.apply_sort_order(SortOrder::Custom);
+    let a = custom_order_id_of(&env.view, "a1");
+    let b = custom_order_id_of(&env.view, "b1");
+
+    // The peer empties bbb and removes the group; this view still draws both.
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|rows, groups| {
+            rows.retain(|r| r.id != b);
+            groups.retain(|g| g.path != "bbb");
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        env.view.get_instance(&b).is_some(),
+        "the deleted row is still on this view's screen"
+    );
+
+    let at = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Session { id, .. } if *id == a))
+        .expect("a1 row");
+    env.view.cursor = at;
+    env.view.update_selected();
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+
+    let (rows, groups) = Storage::open_unwatched("test")
+        .unwrap()
+        .load_with_groups()
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.id == a)
+            .map(|r| r.group_path.clone()),
+        Some("aaa".to_string()),
+        "the row stays where it was"
+    );
+    assert!(
+        !groups.iter().any(|g| g.path == "bbb"),
+        "and the deleted group is not written back"
+    );
+    assert!(
+        env.view.get_instance(&b).is_none(),
+        "the list is refreshed instead, dropping the peer's deleted row"
+    );
+    assert!(env.view.status_flash.is_some(), "the refresh is explained");
+}
+
+/// A peer moves the cursor's session to another group first. The anchor no longer sits where
+/// the list drew it, so the move is dropped and the list refreshed: taken as an edge instead,
+/// it would push the row into whichever group the stale list showed next.
+#[test]
+#[serial]
+fn test_a_move_is_dropped_when_a_peer_regroups_the_row() {
+    use crate::session::config::SortOrder;
+
+    let instances = [
+        instance_in("a1", "/tmp/a1", "work"),
+        instance_in("x1", "/tmp/x1", "work"),
+        instance_in("c1", "/tmp/c1", "zzz"),
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    env.view.apply_sort_order(SortOrder::Custom);
+    let a = custom_order_id_of(&env.view, "a1");
+    let x = custom_order_id_of(&env.view, "x1");
+
+    // A known order for the work group, which the view then reads.
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|rows, _| {
+            for (id, index) in [(&a, 0u32), (&x, 1)] {
+                if let Some(row) = rows.iter_mut().find(|r| r.id == *id) {
+                    row.sort_index = Some(index);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    env.view.reload_storage_only().unwrap();
+
+    // The peer moves a1 out of work behind this view's back.
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|rows, _| {
+            if let Some(row) = rows.iter_mut().find(|r| r.id == a) {
+                row.group_path = "other".to_string();
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let at = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Session { id, .. } if *id == a))
+        .expect("a1 row");
+    env.view.cursor = at;
+    env.view.update_selected();
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL), None);
+
+    let (rows, _) = Storage::open_unwatched("test")
+        .unwrap()
+        .load_with_groups()
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.id == a)
+            .map(|r| r.group_path.clone()),
+        Some("other".to_string()),
+        "the peer's grouping stands"
+    );
+    assert_eq!(
+        env.view
+            .get_instance(&a)
+            .map(|i| i.group_path.clone())
+            .as_deref(),
+        Some("other"),
+        "and the list now shows it there"
+    );
+}
+
+/// The move is stored before the destination group is expanded, so a failed expansion write
+/// still leaves the row in its new group on disk. The list is rebuilt either way: returning
+/// early would leave the cursor on a row the store places elsewhere.
+#[test]
+#[serial]
+fn test_a_failed_expansion_still_settles_the_list() {
+    use crate::session::config::SortOrder;
+
+    let instances = [
+        instance_in("a1", "/tmp/a1", "aaa"),
+        instance_in("b1", "/tmp/b1", "bbb"),
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    env.view.apply_sort_order(SortOrder::Custom);
+    let a = custom_order_id_of(&env.view, "a1");
+
+    // What a committed cross-group move leaves behind, before the expansion write is tried.
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|rows, _| {
+            if let Some(row) = rows.iter_mut().find(|r| r.id == a) {
+                row.group_path = "bbb".to_string();
+            }
+            Ok(())
+        })
+        .unwrap();
+    if let Some(row) = env.view.instances.get_mut(&a) {
+        row.group_path = "bbb".to_string();
+    }
+
+    env.view
+        .after_committed_cross_group_move(Err(anyhow::anyhow!("groups.json write failed")));
+
+    let header = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Group { path, .. } if path == "bbb"))
+        .expect("bbb header");
+    let row = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Session { id, .. } if *id == a))
+        .expect("a1 row");
+    assert!(
+        row > header,
+        "the list is rebuilt around the stored move: a1 at {row}, bbb header at {header}"
+    );
+    assert!(env.view.status_flash.is_some(), "the failure is explained");
+}
+
+/// The boundary half of a move runs in a second transaction, after the first has reported
+/// the row against the edge of its group. A peer that regroups the row in between must not
+/// have its change overwritten by a membership decided from the earlier read.
+#[test]
+#[serial]
+fn test_a_boundary_move_rechecks_the_anchor_against_the_store() {
+    use crate::session::config::SortOrder;
+
+    let instances = [
+        instance_in("a1", "/tmp/a1", "work"),
+        instance_in("c1", "/tmp/c1", "zzz"),
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    env.view.apply_sort_order(SortOrder::Custom);
+    let a = custom_order_id_of(&env.view, "a1");
+
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|rows, _| {
+            if let Some(row) = rows.iter_mut().find(|r| r.id == a) {
+                row.group_path = "other".to_string();
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    env.view
+        .move_session_across_groups(&a, 1)
+        .expect("the boundary move is dropped, not failed");
+
+    let (rows, _) = Storage::open_unwatched("test")
+        .unwrap()
+        .load_with_groups()
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.id == a)
+            .map(|r| r.group_path.clone()),
+        Some("other".to_string()),
+        "the peer's grouping stands"
+    );
+}

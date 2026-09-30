@@ -6,6 +6,25 @@
 use super::*;
 use crate::session::config::{GroupByMode, SortOrder};
 
+/// What a move attempt found once it held the lock.
+enum MoveOutcome {
+    /// The rows were renumbered and the view reconciled with them.
+    Moved,
+    /// The row is already against the edge of its group, so a caller may cross the boundary.
+    AtEdge,
+    /// The rows this move was aimed at have changed underneath the list: the anchor is gone,
+    /// a peer moved it to another group, or the destination group no longer exists.
+    Stale,
+}
+
+/// The same three answers for a group header, carrying the reordered groups when there are
+/// any to publish.
+enum GroupMoveOutcome {
+    Moved(Vec<Group>),
+    AtEdge,
+    Stale,
+}
+
 impl HomeView {
     /// Move the cursor's row one slot in `delta` (-1 up, 1 down). A session moves among the
     /// sessions of its own group and profile; a group header moves among the groups sharing
@@ -32,103 +51,152 @@ impl HomeView {
     }
 
     fn move_session_row(&mut self, id: &str, delta: isize) -> anyhow::Result<()> {
-        if self.apply_move(id, delta, None)? {
-            self.rebuild_flat_items_keeping_cursor();
-            return Ok(());
+        match self.apply_move(id, delta, None)? {
+            MoveOutcome::Moved => {
+                self.rebuild_flat_items_keeping_cursor();
+                Ok(())
+            }
+            // Already at the edge of its own group: carry on into the neighbouring one.
+            MoveOutcome::AtEdge => self.move_session_across_groups(id, delta),
+            MoveOutcome::Stale => self.refresh_after_stale_move(),
         }
-        // Already at the edge of its own group: carry on into the neighbouring one.
-        self.move_session_across_groups(id, delta)
+    }
+
+    /// Drop a move aimed at rows that have since changed and show the current list instead.
+    /// Repeating the keystroke then acts on what is on screen.
+    fn refresh_after_stale_move(&mut self) -> anyhow::Result<()> {
+        self.reload_storage_only()?;
+        self.flash_status("Rows changed elsewhere, list refreshed");
+        Ok(())
     }
 
     /// Move `id` by `delta` inside its group, or into `target_group` when crossing a
     /// boundary, and renumber the whole destination sibling set — all computed from the rows
     /// the store holds under the lock. Reading the order beforehand and writing a diff lets a
     /// peer's concurrent swap survive alongside this one, leaving two rows sharing an index.
+    /// The anchor and the destination are checked against those same locked rows, so a move
+    /// decided from the drawn list cannot write a membership a peer has since removed.
     fn apply_move(
         &mut self,
         id: &str,
         delta: isize,
         target_group: Option<String>,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<MoveOutcome> {
         let Some(anchor) = self.instances.get(id) else {
-            return Ok(false);
+            return Ok(MoveOutcome::Stale);
         };
         let profile = anchor.source_profile.clone();
         let source_group = anchor.group_path.clone();
         let Some(storage) = self.storages.get(&profile) else {
-            return Ok(false);
+            return Ok(MoveOutcome::Stale);
         };
 
-        let moved: Vec<(String, u32, Option<String>)> = storage.update(|instances, _groups| {
-            let group = target_group.clone().unwrap_or_else(|| source_group.clone());
-            let mut siblings: Vec<&Instance> = instances
-                .iter()
-                .filter(|i| {
-                    i.group_path == group
+        let moved: Option<Vec<(String, u32, Option<String>)>> =
+            storage.update(|instances, groups| {
+                // The drawn row is a copy taken before the lock. If the store's row has since been
+                // archived, trashed, deleted or regrouped, every position computed from the list is
+                // about a layout that no longer exists.
+                let anchor_is_current = instances.iter().any(|i| {
+                    i.id == id
                         && i.source_profile == profile
+                        && i.group_path == source_group
                         && !i.is_archived()
                         && !i.is_trashed()
-                        && i.id != id
-                })
-                .collect();
-            siblings.sort_by_key(|i| {
-                (
-                    i.sort_index.unwrap_or(u32::MAX),
-                    std::cmp::Reverse(i.created_at),
-                )
-            });
-            let mut order: Vec<String> = siblings.iter().map(|i| i.id.to_string()).collect();
-
-            match &target_group {
-                // Crossing a boundary: land against the edge that was crossed.
-                Some(_) if delta < 0 => order.push(id.to_string()),
-                Some(_) => order.insert(0, id.to_string()),
-                None => {
-                    // Within the group, the anchor's own position is read under the lock too.
-                    let mut own = instances
-                        .iter()
-                        .filter(|i| {
-                            i.group_path == group
+                });
+                if !anchor_is_current {
+                    return Ok(None);
+                }
+                if let Some(destination) = &target_group {
+                    // The ungrouped bucket is always there; any other destination has to be a
+                    // group the store still holds, either declared or standing for live members.
+                    // Writing the membership blind would let the next tree rebuild synthesize a
+                    // group a peer has just deleted.
+                    let destination_exists = destination.is_empty()
+                        || groups.iter().any(|g| g.path == *destination)
+                        || instances.iter().any(|i| {
+                            i.group_path == *destination
                                 && i.source_profile == profile
                                 && !i.is_archived()
                                 && !i.is_trashed()
-                        })
-                        .collect::<Vec<_>>();
-                    own.sort_by_key(|i| {
-                        (
-                            i.sort_index.unwrap_or(u32::MAX),
-                            std::cmp::Reverse(i.created_at),
-                        )
-                    });
-                    let Some(at) = own.iter().position(|i| i.id == id) else {
-                        return Ok(Vec::new());
-                    };
-                    let Some(to) = at.checked_add_signed(delta).filter(|t| *t < own.len()) else {
-                        return Ok(Vec::new());
-                    };
-                    order = own.iter().map(|i| i.id.to_string()).collect();
-                    order.swap(at, to);
-                }
-            }
-
-            let mut applied = Vec::with_capacity(order.len());
-            for (position, sibling) in order.iter().enumerate() {
-                let position = position as u32;
-                if let Some(row) = instances.iter_mut().find(|i| i.id == *sibling) {
-                    row.sort_index = Some(position);
-                    if row.id == id {
-                        if let Some(group) = &target_group {
-                            row.group_path = group.clone();
-                        }
+                        });
+                    if !destination_exists {
+                        return Ok(None);
                     }
-                    applied.push((row.id.clone(), position, target_group.clone()));
                 }
-            }
-            Ok(applied)
-        })?;
+                let group = target_group.clone().unwrap_or_else(|| source_group.clone());
+                let mut siblings: Vec<&Instance> = instances
+                    .iter()
+                    .filter(|i| {
+                        i.group_path == group
+                            && i.source_profile == profile
+                            && !i.is_archived()
+                            && !i.is_trashed()
+                            && i.id != id
+                    })
+                    .collect();
+                siblings.sort_by_key(|i| {
+                    (
+                        i.sort_index.unwrap_or(u32::MAX),
+                        std::cmp::Reverse(i.created_at),
+                    )
+                });
+                let mut order: Vec<String> = siblings.iter().map(|i| i.id.to_string()).collect();
 
+                match &target_group {
+                    // Crossing a boundary: land against the edge that was crossed.
+                    Some(_) if delta < 0 => order.push(id.to_string()),
+                    Some(_) => order.insert(0, id.to_string()),
+                    None => {
+                        // Within the group, the anchor's own position is read under the lock too.
+                        let mut own = instances
+                            .iter()
+                            .filter(|i| {
+                                i.group_path == group
+                                    && i.source_profile == profile
+                                    && !i.is_archived()
+                                    && !i.is_trashed()
+                            })
+                            .collect::<Vec<_>>();
+                        own.sort_by_key(|i| {
+                            (
+                                i.sort_index.unwrap_or(u32::MAX),
+                                std::cmp::Reverse(i.created_at),
+                            )
+                        });
+                        let Some(at) = own.iter().position(|i| i.id == id) else {
+                            return Ok(None);
+                        };
+                        let Some(to) = at.checked_add_signed(delta).filter(|t| *t < own.len())
+                        else {
+                            // A genuine edge, told apart from staleness by the anchor check above.
+                            return Ok(Some(Vec::new()));
+                        };
+                        order = own.iter().map(|i| i.id.to_string()).collect();
+                        order.swap(at, to);
+                    }
+                }
+
+                let mut applied = Vec::with_capacity(order.len());
+                for (position, sibling) in order.iter().enumerate() {
+                    let position = position as u32;
+                    if let Some(row) = instances.iter_mut().find(|i| i.id == *sibling) {
+                        row.sort_index = Some(position);
+                        if row.id == id {
+                            if let Some(group) = &target_group {
+                                row.group_path = group.clone();
+                            }
+                        }
+                        applied.push((row.id.clone(), position, target_group.clone()));
+                    }
+                }
+                Ok(Some(applied))
+            })?;
+
+        let Some(moved) = moved else {
+            return Ok(MoveOutcome::Stale);
+        };
         if moved.is_empty() {
-            return Ok(false);
+            return Ok(MoveOutcome::AtEdge);
         }
         // Reconcile the view with what the store now holds.
         for (row_id, position, group) in &moved {
@@ -141,7 +209,7 @@ impl HomeView {
                 }
             }
         }
-        Ok(true)
+        Ok(MoveOutcome::Moved)
     }
 
     /// Group paths in the order the list shows them, restricted to `profile`, including the
@@ -194,7 +262,11 @@ impl HomeView {
     /// against the boundary it crossed: at the bottom of the group above, the top of the
     /// group below, so a held key walks the row through the list. The neighbour is looked up
     /// inside the row's own profile, so a move never lands it in another profile's group.
-    fn move_session_across_groups(&mut self, id: &str, delta: isize) -> anyhow::Result<()> {
+    pub(super) fn move_session_across_groups(
+        &mut self,
+        id: &str,
+        delta: isize,
+    ) -> anyhow::Result<()> {
         let Some((current, profile)) = self
             .instances
             .get(id)
@@ -214,14 +286,31 @@ impl HomeView {
             return Ok(());
         };
 
-        if !self.apply_move(id, delta, Some(target.clone()))? {
-            return Ok(());
+        match self.apply_move(id, delta, Some(target.clone()))? {
+            MoveOutcome::Moved => {}
+            MoveOutcome::AtEdge => return Ok(()),
+            MoveOutcome::Stale => return self.refresh_after_stale_move(),
         }
         // A collapsed destination would hide the row it just received: the cursor could not
         // follow it, and the next move would act on a session that is no longer on screen.
-        self.reveal_group(&profile, &target)?;
-        self.rebuild_flat_items_keeping_cursor();
+        let revealed = self.reveal_group(&profile, &target);
+        self.after_committed_cross_group_move(revealed);
         Ok(())
+    }
+
+    /// Settle the list after a move that is already stored. The row has changed group on disk
+    /// whatever the expansion write did, so the list is rebuilt either way: returning early on
+    /// that error would leave the cursor on a row the store places elsewhere.
+    pub(super) fn after_committed_cross_group_move(&mut self, revealed: anyhow::Result<()>) {
+        self.rebuild_flat_items_keeping_cursor();
+        if let Err(error) = revealed {
+            tracing::warn!(
+                target: "tui.reorder",
+                error = %error,
+                "expanding the destination group failed after a move"
+            );
+            self.flash_status("Moved, but the destination group stayed collapsed");
+        }
     }
 
     /// Expand `path` and its ancestors so a row moved into them stays visible.
@@ -296,10 +385,15 @@ impl HomeView {
         // Build the tree from what the store actually holds, inside the lock. Moving the
         // in-memory tree and writing that back would resurrect a group a peer deleted while
         // this view was open, and drop metadata the peer changed.
-        let moved: Option<Vec<Group>> = storage.update(|instances, disk_groups| {
+        let moved: GroupMoveOutcome = storage.update(|instances, disk_groups| {
             let mut tree = GroupTree::new_with_groups(instances, disk_groups);
+            if !tree.get_all_groups().iter().any(|g| g.path == group_path) {
+                // The header under the cursor was drawn from an older read; a peer has since
+                // deleted the group or emptied it.
+                return Ok(GroupMoveOutcome::Stale);
+            }
             if !tree.move_group(group_path, delta) {
-                return Ok(None);
+                return Ok(GroupMoveOutcome::AtEdge);
             }
             let mut groups = tree.get_all_groups();
             for g in &mut groups {
@@ -308,11 +402,13 @@ impl HomeView {
                 }
             }
             *disk_groups = groups.clone();
-            Ok(Some(groups))
+            Ok(GroupMoveOutcome::Moved(groups))
         })?;
 
-        let Some(groups) = moved else {
-            return Ok(());
+        let groups = match moved {
+            GroupMoveOutcome::Moved(groups) => groups,
+            GroupMoveOutcome::AtEdge => return Ok(()),
+            GroupMoveOutcome::Stale => return self.refresh_after_stale_move(),
         };
         let instances = self.cloned_instances_for_profile(&profile);
         self.group_trees
