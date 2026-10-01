@@ -947,27 +947,45 @@ fn help_advertises_flag(help: &str, flag: &str) -> bool {
 struct HelpProbe {
     help: Option<String>,
     retry_at: Option<std::time::Instant>,
+    in_flight: bool,
 }
 
 impl HelpProbe {
+    /// The deadline for a probe that should run now, if one should.
+    fn due(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        if self.help.is_some() || self.in_flight || self.retry_at.is_some_and(|at| now < at) {
+            return None;
+        }
+        Some(if self.retry_at.is_some() {
+            PI_HELP_RETRY_TIMEOUT
+        } else {
+            PI_HELP_PROBE_TIMEOUT
+        })
+    }
+
+    fn record(
+        &mut self,
+        help: Option<String>,
+        timeout: std::time::Duration,
+        now: std::time::Instant,
+    ) {
+        self.help = help;
+        if self.help.is_none() {
+            tracing::warn!(target: "session.create", timeout_secs = timeout.as_secs(),
+                "agent --help did not answer; launching without the flags it gates until a retry succeeds");
+            // Timed from the answer, so a probe that ran to its deadline still cools down.
+            self.retry_at = Some(now + PI_HELP_RETRY_COOLDOWN);
+        }
+    }
+
     fn help(
         &mut self,
         clock: impl Fn() -> std::time::Instant,
         probe: impl FnOnce(std::time::Duration) -> Option<String>,
     ) -> &str {
-        if self.help.is_none() && self.retry_at.is_none_or(|at| clock() >= at) {
-            let timeout = if self.retry_at.is_some() {
-                PI_HELP_RETRY_TIMEOUT
-            } else {
-                PI_HELP_PROBE_TIMEOUT
-            };
-            self.help = probe(timeout);
-            if self.help.is_none() {
-                tracing::warn!(target: "session.create", timeout_secs = timeout.as_secs(),
-                    "pi --help did not answer; launching without session-id capture until a retry succeeds");
-                // Timed from the answer, so a probe that ran to its deadline still cools down.
-                self.retry_at = Some(clock() + PI_HELP_RETRY_COOLDOWN);
-            }
+        if let Some(timeout) = self.due(clock()) {
+            let help = probe(timeout);
+            self.record(help, timeout, clock());
         }
         self.help.as_deref().unwrap_or_default()
     }
@@ -996,6 +1014,7 @@ fn pi_help_advertises(flag: &str) -> bool {
     static PROBE: std::sync::Mutex<HelpProbe> = std::sync::Mutex::new(HelpProbe {
         help: None,
         retry_at: None,
+        in_flight: false,
     });
     // Held across the probe: launches racing it wait for the answer instead of starting
     // without session-id capture.
@@ -1017,6 +1036,12 @@ fn agent_help_probes(
 /// above. Used for a flag an older install of an agent would reject outright, where guessing
 /// wrong costs the user the launch.
 fn agent_help_advertises(binary: &'static str, flag: &str) -> bool {
+    if DEFER_AGENT_HELP_PROBES.load(std::sync::atomic::Ordering::Relaxed) {
+        let help = deferred_agent_help(agent_help_probes(), binary, move |timeout| {
+            run_agent_help(binary, timeout)
+        });
+        return help_advertises_flag(&help, flag);
+    }
     let mut probes = agent_help_probes()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1027,6 +1052,47 @@ fn agent_help_advertises(binary: &'static str, flag: &str) -> bool {
         }),
         flag,
     )
+}
+
+static DEFER_AGENT_HELP_PROBES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// For the TUI and the daemon, which launch on a keypress or a request: launches read the
+/// probes from the cache and a miss refreshes it in the background, so an agent slow to answer
+/// `--help` costs the first launch its gated flags rather than holding it. Probes every agent
+/// with a display-name flag now, so the cache is warm before the first launch.
+pub fn defer_agent_help_probes() {
+    DEFER_AGENT_HELP_PROBES.store(true, std::sync::atomic::Ordering::Relaxed);
+    for agent in AGENTS.iter().filter(|a| a.display_name_flag().is_some()) {
+        let binary = agent.binary;
+        deferred_agent_help(agent_help_probes(), binary, move |timeout| {
+            run_agent_help(binary, timeout)
+        });
+    }
+}
+
+fn deferred_agent_help(
+    probes: &'static std::sync::Mutex<std::collections::HashMap<&'static str, HelpProbe>>,
+    binary: &'static str,
+    run: impl FnOnce(std::time::Duration) -> Option<String> + Send + 'static,
+) -> String {
+    let mut guard = probes
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let probe = guard.entry(binary).or_default();
+    if let Some(timeout) = probe.due(std::time::Instant::now()) {
+        probe.in_flight = true;
+        std::thread::spawn(move || {
+            let help = run(timeout);
+            let mut guard = probes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let probe = guard.entry(binary).or_default();
+            probe.in_flight = false;
+            probe.record(help, timeout, std::time::Instant::now());
+        });
+    }
+    probe.help.clone().unwrap_or_default()
 }
 
 /// Seed the cache so a test does not depend on the agent being installed.
@@ -1040,6 +1106,7 @@ pub(crate) fn seed_agent_help_for_test(binary: &'static str, help: &str) {
         HelpProbe {
             help: Some(help.to_string()),
             retry_at: None,
+            in_flight: false,
         },
     );
 }
@@ -1424,6 +1491,48 @@ mod tests {
         now.set(now.get() + PI_HELP_RETRY_COOLDOWN);
         assert_eq!(probe.help(|| now.get(), |_| unreachable!("cached")), help);
         assert_eq!(timeouts, [PI_HELP_PROBE_TIMEOUT, PI_HELP_RETRY_TIMEOUT]);
+    }
+
+    #[test]
+    fn a_deferred_help_probe_answers_from_the_cache_without_waiting_for_the_agent() {
+        let probes: &'static _ = Box::leak(Box::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )));
+        let runs: &'static _ = Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let probe = move |_| {
+            runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            gate.recv_timeout(std::time::Duration::from_secs(10)).ok()?;
+            Some("  -n, --name <name>\n".to_string())
+        };
+
+        let counted_miss = move |_| {
+            runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        };
+
+        let started = std::time::Instant::now();
+        assert_eq!(deferred_agent_help(probes, "claude", probe), "");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the launch waited for an agent that had not answered --help"
+        );
+        assert_eq!(
+            deferred_agent_help(probes, "claude", counted_miss),
+            "",
+            "a launch racing the probe neither waits nor starts a second one"
+        );
+
+        release.send(()).expect("probe still waiting");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !deferred_agent_help(probes, "claude", counted_miss).contains("--name") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the background answer never reached the cache"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -122,6 +122,9 @@ async fn main() -> Result<()> {
     } else {
         ProcessContext::OneShotCli
     };
+    if !matches!(ctx, ProcessContext::OneShotCli) {
+        agent_of_empires::agents::defer_agent_help_probes();
+    }
 
     // One-shot CLI runs get no subscriber unless `AOE_LOG_LEVEL` is set.
     let should_init = matches!(
