@@ -51,7 +51,7 @@ pub(super) fn apply_display_name_for_test(
     agent: Option<&crate::agents::AgentDef>,
     inst: &mut Instance,
 ) {
-    apply_display_name(cmd, agent, inst)
+    apply_display_name(cmd, agent, inst, None)
 }
 
 /// Append the agent's display-name flag, so a rename in AoE reaches the agent's own session
@@ -61,6 +61,7 @@ fn apply_display_name(
     cmd: &mut String,
     agent: Option<&crate::agents::AgentDef>,
     inst: &mut Instance,
+    execution: Option<&super::execution::NativeExecution>,
 ) {
     // Reset first: a launch that skips the flag must not retire a park on the strength of an
     // earlier one that did not.
@@ -77,6 +78,17 @@ fn apply_display_name(
     // daemon and the TUI alike, so a process-wide cache set by one of them would leave the
     // others silently ignoring the setting.
     if !inst.push_title_mode().on_launch() {
+        return;
+    }
+    // The probe ran the agent the daemon's PATH finds, so it only speaks for a launch that
+    // runs that same binary.
+    let probed_binary_launches = match execution {
+        Some(execution) => execution
+            .inputs
+            .runs_host_path_binary(agent.binary, &execution.program),
+        None => !environment_defines_path(&inst.resolved_host_environment()),
+    };
+    if !probed_binary_launches {
         return;
     }
     let Some(flag) = agent.supported_display_name_flag() else {
@@ -923,7 +935,7 @@ impl Instance {
                     }
                     let is_existing =
                         self.apply_session_flags(&mut cmd, "host agent", agent, execution)?;
-                    apply_display_name(&mut cmd, agent, self);
+                    apply_display_name(&mut cmd, agent, self, execution);
                     apply_agent_launch_env(&mut cmd, agent);
                     let raw_command = format!("{}{}", env_prefix, cmd);
                     let command = if let Some(plan) = omp_capture_plan.as_ref() {
@@ -960,7 +972,7 @@ impl Instance {
             }
             let is_existing =
                 self.apply_session_flags(&mut cmd, "host custom", agent, execution)?;
-            apply_display_name(&mut cmd, agent, self);
+            apply_display_name(&mut cmd, agent, self, execution);
             apply_agent_launch_env(&mut cmd, agent);
             let raw_command = format!("{}{}", env_prefix, cmd);
             let command = if let Some(plan) = omp_capture_plan.as_ref() {
@@ -2375,6 +2387,34 @@ mod tests {
             !command.contains("--name"),
             "the title would follow `--` as a prompt: {command}"
         );
+        assert_eq!(claude.display_name_launched, None);
+    }
+
+    /// The probe ran the agent the daemon's PATH finds, so a launch whose environment sets its
+    /// own PATH may run another install, one older than the flag: it is launched without it,
+    /// and nothing is recorded as delivered.
+    #[test]
+    #[serial_test::serial]
+    fn a_launch_with_its_own_path_is_not_vouched_for_by_the_probe() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_home(temp_home.path());
+        let project = temp_home.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::agents::seed_agent_help_for_test(
+            "claude",
+            "  -n, --name <name>  Set a display name\n",
+        );
+
+        let mut claude = tool_instance("claude", project.to_str().unwrap());
+        claude.title = "plan".to_string();
+        assert!(
+            host_command(&mut claude).contains("--name"),
+            "the same session on the daemon's PATH is named"
+        );
+
+        claude.pending_host_env = vec![("PATH".to_string(), "/opt/old-claude/bin".to_string())];
+        let command = host_command(&mut claude);
+        assert!(!command.contains("--name"), "{command}");
         assert_eq!(claude.display_name_launched, None);
     }
 

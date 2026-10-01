@@ -295,6 +295,15 @@ pub(super) struct NativeLaunchInputs {
     pub(super) identity_extension: Option<(String, String)>,
 }
 impl NativeLaunchInputs {
+    /// Whether the pane runs `program` as the binary the daemon's own PATH resolves `binary`
+    /// to, which is what a host `--help` probe of `binary` describes.
+    pub(super) fn runs_host_path_binary(&self, binary: &str, program: &std::path::Path) -> bool {
+        self.container.is_none()
+            && !self.pane_env.iter().any(|entry| matches!(entry, crate::tmux::PaneEnvMutation::Set { key, .. } | crate::tmux::PaneEnvMutation::Unset { key } if key == "PATH"))
+            && self.environment.get("PATH") == std::env::var("PATH").ok().as_ref()
+            && which::which(binary).ok().as_deref() == Some(program)
+    }
+
     fn read_native_file(&self, path: &std::path::Path) -> Result<Option<Vec<u8>>> {
         let native = self.canonical_path(path)?;
         let location = self.physical_location(&native);
@@ -1889,10 +1898,8 @@ impl Instance {
         } else {
             None
         };
-        let pi_pinnable = agent.name == "pi" && inputs.container.is_none()
-            && !inputs.pane_env.iter().any(|entry| matches!(entry, crate::tmux::PaneEnvMutation::Set { key, .. } | crate::tmux::PaneEnvMutation::Unset { key } if key == "PATH"))
-            && inputs.environment.get("PATH") == std::env::var("PATH").ok().as_ref()
-            && which::which("pi").ok().as_deref() == Some(program.as_path())
+        let pi_pinnable = agent.name == "pi"
+            && inputs.runs_host_path_binary("pi", &program)
             && crate::agents::pi_supports_session_id_flag();
         let opencode_preassign = agent.name == "opencode"
             && inputs.container.is_none()
@@ -2486,6 +2493,55 @@ impl Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host `--help` probe only describes the launch that runs the binary the daemon's own
+    /// PATH finds: a pane with its own PATH, or one pinned to another executable, may run an
+    /// older install that rejects a flag the probed one advertises.
+    #[cfg(unix)]
+    #[test]
+    fn a_host_probe_speaks_only_for_the_binary_the_daemon_path_resolves() {
+        let sh = which::which("sh").expect("sh on PATH");
+        let host_path = std::env::var("PATH").expect("PATH set");
+        let inputs =
+            |path: Option<&str>, pane_env: Vec<crate::tmux::PaneEnvMutation>| NativeLaunchInputs {
+                launch_id: "launch".into(),
+                environment: path
+                    .map(|path| [("PATH".to_string(), path.to_string())].into())
+                    .unwrap_or_default(),
+                cwd: PathBuf::from("/tmp"),
+                profile: "default".into(),
+                container: None,
+                docker_env: None,
+                pane_env,
+                identity_extension: None,
+            };
+        let same = inputs(Some(&host_path), Vec::new());
+        assert!(same.runs_host_path_binary("sh", &sh));
+        assert!(
+            !same.runs_host_path_binary("sh", std::path::Path::new("/opt/old/sh")),
+            "a pinned executable is not the one the probe ran"
+        );
+        assert!(
+            !inputs(Some("/opt/old/bin"), Vec::new()).runs_host_path_binary("sh", &sh),
+            "a launch environment with its own PATH"
+        );
+        assert!(
+            !inputs(None, Vec::new()).runs_host_path_binary("sh", &sh),
+            "a launch environment without the daemon's PATH"
+        );
+        for mutation in [
+            crate::tmux::PaneEnvMutation::Set {
+                key: "PATH".into(),
+                value: "/opt/old/bin".into(),
+            },
+            crate::tmux::PaneEnvMutation::Unset { key: "PATH".into() },
+        ] {
+            assert!(
+                !inputs(Some(&host_path), vec![mutation.clone()]).runs_host_path_binary("sh", &sh),
+                "a pane that rewrites PATH: {mutation:?}"
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]
