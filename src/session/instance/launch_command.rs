@@ -65,7 +65,12 @@ fn apply_display_name(
     // Reset first: a launch that skips the flag must not retire a park on the strength of an
     // earlier one that did not.
     inst.display_name_launched = None;
-    if inst.has_command_override() {
+    // An appended flag only reaches the agent on a direct invocation: after a `--` it is a
+    // positional argument, which Claude would take as the opening prompt.
+    let Some(agent) = agent else {
+        return;
+    };
+    if inst.has_command_override() || !inst.launch_invokes_resolved_agent_directly(agent) {
         return;
     }
     // Read through the instance's own profile: the launch path runs from the CLI, the
@@ -74,7 +79,7 @@ fn apply_display_name(
     if !inst.push_title_mode().on_launch() {
         return;
     }
-    let Some(flag) = agent.and_then(|a| a.supported_display_name_flag()) else {
+    let Some(flag) = agent.supported_display_name_flag() else {
         return;
     };
     let title = inst.title.trim();
@@ -746,9 +751,10 @@ impl Instance {
             }
             let is_existing =
                 self.apply_session_flags(&mut tool_cmd, "sandboxed", agent, execution)?;
-            // After the session flags, so a user-typed value is never in the command they
-            // scan for a session selector, whatever that scan grows into.
-            apply_display_name(&mut tool_cmd, agent, self);
+            // No display-name flag here: this execs the container's agent, which may be older
+            // than the host binary the flag was probed against, and an unknown option would
+            // take the launch down. A sandboxed session is renamed by typing alone.
+            self.display_name_launched = None;
             apply_agent_launch_env(&mut tool_cmd, agent);
 
             let fallback_environment = if execution.is_none() {
@@ -2341,6 +2347,37 @@ mod tests {
         );
     }
 
+    /// After a `--` the agent reads everything that follows as positional, so the title would
+    /// arrive as the opening prompt rather than as a name: the flag is withheld, and nothing is
+    /// recorded as delivered.
+    #[test]
+    #[serial_test::serial]
+    fn an_argument_terminator_keeps_the_title_off_the_launch_line() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_home(temp_home.path());
+        let project = temp_home.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::agents::seed_agent_help_for_test(
+            "claude",
+            "  -n, --name <name>  Set a display name\n",
+        );
+
+        let mut claude = tool_instance("claude", project.to_str().unwrap());
+        claude.title = "plan".to_string();
+        assert!(
+            host_command(&mut claude).contains("--name"),
+            "the same session without a terminator is named"
+        );
+
+        claude.extra_args = "--".to_string();
+        let command = host_command(&mut claude);
+        assert!(
+            !command.contains("--name"),
+            "the title would follow `--` as a prompt: {command}"
+        );
+        assert_eq!(claude.display_name_launched, None);
+    }
+
     /// A title that reads as a flag is left off rather than passed: the agent's own parser
     /// rejects it and the session dies at launch with nothing pointing at the title.
     #[test]
@@ -2398,7 +2435,7 @@ mod tests {
     /// appended there too: a fix in the host builder alone skips every containerized session.
     #[test]
     #[serial_test::serial]
-    fn sandboxed_command_carries_the_display_name() {
+    fn a_sandboxed_launch_carries_no_display_name_flag() {
         crate::agents::seed_agent_help_for_test(
             "claude",
             "  -n, --name <name>  Set a display name\n",
@@ -2445,16 +2482,17 @@ mod tests {
             .unwrap()
             .command
             .expect("a sandboxed launch command");
-        // The container argv is nested inside `sh -c`, which re-escapes the quoting, so it is
-        // stripped here to assert adjacency rather than presence somewhere later in the argv.
-        let at = command
-            .find("--name")
-            .unwrap_or_else(|| panic!("no display name in the container argv: {command}"));
-        let tail = command[at + "--name".len()..].trim_start();
-        let value = tail.trim_start_matches(['\'', '\\']);
         assert!(
-            value.starts_with("night shift"),
-            "the title is the flag's own value, not something later in the argv: {command}"
+            command.contains("--session-id"),
+            "the session flags were applied, so the launch line was really built: {command}"
+        );
+        assert!(
+            !command.contains("--name"),
+            "the container's agent may predate the flag the host advertised: {command}"
+        );
+        assert_eq!(
+            inst.display_name_launched, None,
+            "so nothing was delivered, and no park may be retired on the strength of it"
         );
     }
 }

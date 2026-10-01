@@ -263,12 +263,11 @@ fn flush_pending_agent_title(profile: &str, id: &str) -> Result<()> {
     if !take_pending_agent_title(&storage, id, &parked)? {
         return Ok(());
     }
+    // A failed send is not parked again: the text and the Enter go out as separate tmux
+    // commands, so a failure can leave the title already typed, and a retry would type it a
+    // second time. The launch flag still carries it at the next start.
     let delay = crate::agents::send_keys_enter_delay(&inst.tool);
-    if let Err(error) = pane.send_keys_with_delay(&keystrokes, delay) {
-        repark_pending_agent_title(&storage, id, &parked)?;
-        return Err(error);
-    }
-    Ok(())
+    pane.send_keys_with_delay(&keystrokes, delay)
 }
 
 /// Whether a failure to lock the row for input means the park has nowhere left to go, as
@@ -290,22 +289,6 @@ fn park_pending_agent_title(
     storage.update(|instances, _groups| {
         if let Some(row) = instances.iter_mut().find(|i| i.id == id) {
             row.pending_agent_title = Some(title.to_string());
-        }
-        Ok(())
-    })
-}
-
-/// Put a claimed title back after a failed send, unless a newer rename has parked its own.
-fn repark_pending_agent_title(
-    storage: &crate::session::Storage,
-    id: &str,
-    title: &str,
-) -> Result<()> {
-    storage.update(|instances, _groups| {
-        if let Some(row) = instances.iter_mut().find(|i| i.id == id) {
-            if row.pending_agent_title.is_none() {
-                row.pending_agent_title = Some(title.to_string());
-            }
         }
         Ok(())
     })
@@ -582,16 +565,6 @@ mod tests {
         assert!(
             !take_pending_agent_title(&storage, &inst.id, "second").unwrap(),
             "a second worker finds nothing to claim, so it cannot type it again"
-        );
-
-        repark_pending_agent_title(&storage, &inst.id, "second").unwrap();
-        assert_eq!(parked(&storage, &inst.id), Some("second".to_string()));
-        park_pending_agent_title(&storage, &inst.id, "third").unwrap();
-        repark_pending_agent_title(&storage, &inst.id, "second").unwrap();
-        assert_eq!(
-            parked(&storage, &inst.id),
-            Some("third".to_string()),
-            "a failed send never puts itself back over a newer rename"
         );
     }
 
