@@ -2444,7 +2444,7 @@ mod tests {
     }
 
     /// A command that merely repeats the agent's own binary is not an override, so the host
-    /// path has to name it like any other agent session; the sandboxed path already did.
+    /// path names it like any other agent session.
     #[test]
     #[serial_test::serial]
     fn a_command_equal_to_the_agent_binary_still_gets_the_display_name() {
@@ -2471,8 +2471,8 @@ mod tests {
         );
     }
 
-    /// The sandboxed branch builds its command by hand, so the display name has to be
-    /// appended there too: a fix in the host builder alone skips every containerized session.
+    /// A sandboxed launch execs the container's agent, which the host probe does not speak
+    /// for, so the title reaches it by typing alone.
     #[test]
     #[serial_test::serial]
     fn a_sandboxed_launch_carries_no_display_name_flag() {
