@@ -14,6 +14,7 @@ impl Instance {
             title: title.to_string(),
             last_auto_title: None,
             pending_agent_title: None,
+            sort_index: None,
             smart_rename_attempted: false,
             project_path: project_path.to_string(),
             group_path: String::new(),
