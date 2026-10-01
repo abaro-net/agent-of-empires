@@ -15,11 +15,10 @@ use crate::tmux::SessionExistence;
 /// What to do with a parked title, given what tmux says about the pane.
 enum ParkDisposition {
     Send,
-    /// tmux could not be queried; the next idle edge tries again.
+    /// tmux could not be queried, or the pane is gone. A gone pane's park waits for the next
+    /// start: a launch that carries the title as its name flag retires it, and one that cannot
+    /// (a sandbox, an install the probe does not vouch for) leaves it for the first idle edge.
     Hold,
-    /// The pane is gone. The launch flag carries the title at the next start for every title
-    /// it accepts, and a title it skips is one the agent would have refused anyway.
-    Drop,
 }
 
 impl Instance {
@@ -116,8 +115,7 @@ fn detection_proves_idle(detection: Option<crate::tmux::detect::Detection>) -> b
 fn park_disposition(existence: SessionExistence) -> ParkDisposition {
     match existence {
         SessionExistence::Present => ParkDisposition::Send,
-        SessionExistence::Absent => ParkDisposition::Drop,
-        SessionExistence::Unknown => ParkDisposition::Hold,
+        SessionExistence::Absent | SessionExistence::Unknown => ParkDisposition::Hold,
     }
 }
 
@@ -202,8 +200,7 @@ fn park_renamed_title(profile: &str, id: &str, title: &str) -> Result<bool> {
     if !inst.accepts_typed_rename() {
         return Ok(false);
     }
-    park_pending_agent_title(&storage, id, title)?;
-    Ok(true)
+    park_pending_agent_title(&storage, id, title)
 }
 
 fn flush_pending_agent_title(profile: &str, id: &str) -> Result<()> {
@@ -245,10 +242,6 @@ fn flush_pending_agent_title(profile: &str, id: &str) -> Result<()> {
 
     let pane = inst.tmux_session()?;
     match park_disposition(pane.existence()) {
-        ParkDisposition::Drop => {
-            take_pending_agent_title(&storage, id, &parked)?;
-            return Ok(());
-        }
         ParkDisposition::Hold => return Ok(()),
         ParkDisposition::Send => {}
     }
@@ -281,16 +274,23 @@ fn park_is_moot(error: &anyhow::Error) -> bool {
             .is_some()
 }
 
+/// Park `title` if it is still the row's own, reporting whether it did. Renames commit the
+/// title and park it in separate steps, so a rename that has since been superseded must not
+/// replace the newer one's park.
 fn park_pending_agent_title(
     storage: &crate::session::Storage,
     id: &str,
     title: &str,
-) -> Result<()> {
+) -> Result<bool> {
     storage.update(|instances, _groups| {
-        if let Some(row) = instances.iter_mut().find(|i| i.id == id) {
-            row.pending_agent_title = Some(title.to_string());
+        let Some(row) = instances.iter_mut().find(|i| i.id == id) else {
+            return Ok(false);
+        };
+        if row.title != title {
+            return Ok(false);
         }
-        Ok(())
+        row.pending_agent_title = Some(title.to_string());
+        Ok(true)
     })
 }
 
@@ -345,6 +345,17 @@ mod tests {
             })
             .unwrap();
         storage
+    }
+
+    fn rename_row(storage: &crate::session::Storage, id: &str, title: &str) {
+        storage
+            .update(|rows, _| {
+                if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
+                    row.title = title.to_string();
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 
     fn parked(storage: &crate::session::Storage, id: &str) -> Option<String> {
@@ -508,7 +519,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _app = crate::session::test_support::isolate_app_dir_at(&temp.path().join("app"));
         set_mode("launch");
-        let inst = claude_row("plan");
+        let inst = claude_row("renamed");
         let storage = seed(&inst);
 
         assert!(!park_renamed_title(PROFILE, &inst.id, "renamed").unwrap());
@@ -542,6 +553,28 @@ mod tests {
         );
     }
 
+    /// Two renames each commit their title and then park it, with no lock across the pair. When
+    /// the older one parks last, its title is no longer the row's: it is refused, so the newer
+    /// rename's park survives instead of being replaced by a title the flush would discard.
+    #[test]
+    #[serial_test::serial]
+    fn a_superseded_rename_cannot_replace_the_newer_park() {
+        let temp = tempfile::tempdir().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(&temp.path().join("app"));
+        set_mode("live");
+        let inst = claude_row("before");
+        let storage = seed(&inst);
+
+        rename_row(&storage, &inst.id, "A");
+        rename_row(&storage, &inst.id, "B");
+        assert!(park_renamed_title(PROFILE, &inst.id, "B").unwrap());
+        assert!(
+            !park_renamed_title(PROFILE, &inst.id, "A").unwrap(),
+            "A was renamed over before it parked"
+        );
+        assert_eq!(parked(&storage, &inst.id), Some("B".to_string()));
+    }
+
     /// Taking the park is the claim that keeps two pollers from both typing it, and it only
     /// takes the title it is about: a rename that landed mid-send parked its own.
     #[test]
@@ -550,9 +583,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _app = crate::session::test_support::isolate_app_dir_at(&temp.path().join("app"));
         set_mode("live");
-        let inst = claude_row("plan");
+        let inst = claude_row("second");
         let storage = seed(&inst);
-        park_pending_agent_title(&storage, &inst.id, "second").unwrap();
+        assert!(park_pending_agent_title(&storage, &inst.id, "second").unwrap());
 
         assert!(
             !take_pending_agent_title(&storage, &inst.id, "first").unwrap(),
@@ -612,22 +645,70 @@ mod tests {
         }
     }
 
-    /// tmux failing to answer is not evidence the pane is gone, so the park waits for the next
-    /// idle edge instead of being retired on a query that never landed.
+    /// Only a present pane is typed into. tmux failing to answer is not evidence the pane is
+    /// gone, and a gone pane's park still has to reach the agent after the next start.
     #[test]
-    fn an_unqueryable_tmux_holds_the_park() {
+    fn only_a_present_pane_releases_the_park() {
         assert!(matches!(
             park_disposition(SessionExistence::Present),
             ParkDisposition::Send
         ));
         assert!(matches!(
             park_disposition(SessionExistence::Absent),
-            ParkDisposition::Drop
+            ParkDisposition::Hold
         ));
         assert!(matches!(
             park_disposition(SessionExistence::Unknown),
             ParkDisposition::Hold
         ));
+    }
+
+    /// A stopped sandboxed session renamed in `live`: its pane is gone, and the sandbox launch
+    /// never carries the name flag, so the park is the only way the title reaches the agent. It
+    /// survives the flush that finds no pane and the launch that did not deliver it, and is
+    /// still the title to type at the first idle edge.
+    #[test]
+    #[serial_test::serial]
+    fn a_stopped_sandbox_keeps_its_park_through_a_launch_without_the_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(&temp.path().join("app"));
+        set_mode("live");
+        let mut inst = claude_row("night shift");
+        inst.sandbox_info = Some(super::super::test_helpers::test_sandbox(
+            "aoe-display-name",
+            None,
+        ));
+        let storage = seed(&inst);
+        assert!(park_renamed_title(PROFILE, &inst.id, "night shift").unwrap());
+
+        let _absent = super::super::test_helpers::force_session_absent();
+        flush_pending_agent_title(PROFILE, &inst.id).unwrap();
+        assert_eq!(
+            parked(&storage, &inst.id),
+            Some("night shift".to_string()),
+            "no pane to type into yet, and the next start will not carry the title either"
+        );
+
+        assert_eq!(
+            inst.display_name_launched, None,
+            "a sandbox launch has no flag"
+        );
+        inst.acquire_lifecycle_reservation(
+            &storage,
+            crate::session::instance::lifecycle::LifecycleOperation::Launch,
+            Some(Status::Starting),
+        )
+        .unwrap();
+        inst.status = Status::Running;
+        inst.commit_lifecycle_launch(&storage, false).unwrap();
+        let row = storage
+            .load()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == inst.id)
+            .unwrap();
+        assert_eq!(row.pending_agent_title.as_deref(), Some("night shift"));
+        assert!(should_type_parked_title(&row, "night shift"));
     }
 
     /// A rename parked while the agent was busy, on a session that is then restarted: the
@@ -642,7 +723,7 @@ mod tests {
         set_mode("live");
         let mut inst = claude_row("renamed");
         let storage = seed(&inst);
-        park_pending_agent_title(&storage, &inst.id, "renamed").unwrap();
+        assert!(park_pending_agent_title(&storage, &inst.id, "renamed").unwrap());
 
         crate::agents::seed_agent_help_for_test(
             "claude",
@@ -670,7 +751,8 @@ mod tests {
             "the park is retired by the launch that delivered it"
         );
 
-        park_pending_agent_title(&storage, &inst.id, "renamed again").unwrap();
+        rename_row(&storage, &inst.id, "renamed again");
+        assert!(park_pending_agent_title(&storage, &inst.id, "renamed again").unwrap());
         commit(&mut inst);
         assert_eq!(
             parked(&storage, &inst.id),
@@ -690,7 +772,7 @@ mod tests {
         let mut inst = claude_row("renamed");
         inst.archived_at = Some(chrono::Utc::now());
         let storage = seed(&inst);
-        park_pending_agent_title(&storage, &inst.id, "renamed").unwrap();
+        assert!(park_pending_agent_title(&storage, &inst.id, "renamed").unwrap());
 
         flush_pending_agent_title(PROFILE, &inst.id).unwrap();
         assert_eq!(parked(&storage, &inst.id), None);
