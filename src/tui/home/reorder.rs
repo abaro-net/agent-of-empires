@@ -6,6 +6,16 @@
 use super::*;
 use crate::session::config::{GroupByMode, SortOrder};
 
+/// Whether `member` is `group` or sits beneath it, compared on whole path components so `ab` is
+/// not taken for a child of `a`. A group with no stored row still exists while a live session sits
+/// in it or anywhere under it, because the tree draws every ancestor of a member's path.
+fn group_contains(group: &str, member: &str) -> bool {
+    member == group
+        || member
+            .strip_prefix(group)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// What a move attempt found once it held the lock.
 enum MoveOutcome {
     /// The rows were renumbered and the view reconciled with them.
@@ -114,7 +124,7 @@ impl HomeView {
                     let destination_exists = destination.is_empty()
                         || groups.iter().any(|g| g.path == *destination)
                         || instances.iter().any(|i| {
-                            i.group_path == *destination
+                            group_contains(destination, &i.group_path)
                                 && i.source_profile == profile
                                 && !i.is_archived()
                                 && !i.is_trashed()
@@ -326,11 +336,12 @@ impl HomeView {
         {
             return;
         }
-        if let Some(at) = self
-            .flat_items
-            .iter()
-            .position(|item| matches!(item, Item::Group { path, .. } if path == target))
-        {
+        let row_profile = self.instances.get(id).map(|row| row.source_profile.clone());
+        if let Some(at) = self.flat_items.iter().position(|item| {
+            matches!(item, Item::Group { path, profile, .. }
+                if path == target
+                    && profile.as_deref().is_none_or(|header| Some(header) == row_profile.as_deref()))
+        }) {
             self.cursor = at;
             self.update_selected();
         }
@@ -449,5 +460,26 @@ impl HomeView {
             .insert(profile, GroupTree::new_with_groups(&instances, &groups));
         self.rebuild_flat_items_keeping_cursor();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::group_contains;
+
+    /// Membership is decided on whole path components: a session in `ab` does not keep a
+    /// deleted `a` alive, while one in `a/b` does.
+    #[test]
+    fn a_group_contains_its_members_and_its_descendants_only() {
+        assert!(group_contains("a", "a"));
+        assert!(group_contains("a", "a/b"));
+        assert!(group_contains("a", "a/b/c"));
+        assert!(group_contains("a/b", "a/b/c"));
+        assert!(
+            !group_contains("a", "ab"),
+            "a shared prefix is not a parent"
+        );
+        assert!(!group_contains("a/b", "a"), "an ancestor is not a member");
+        assert!(!group_contains("a/b", "a/bc"));
     }
 }

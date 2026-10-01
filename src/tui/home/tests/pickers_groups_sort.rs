@@ -2867,3 +2867,165 @@ fn test_ctrl_alt_arrows_do_not_jump_out_of_live_send() {
         "and in particular it did not land on the just-finished session"
     );
 }
+
+/// A session alone in `parent/child`, with no stored group rows at all: the tree still draws
+/// `parent`, because it draws every ancestor of a member's path, so Ctrl+Up has to be able to
+/// land the row there. Counting only exact members took `parent` for a deleted group, refreshed
+/// into the same tree, and the row never moved however often the key was pressed.
+#[test]
+#[serial]
+fn test_a_session_moves_up_into_an_implicit_parent_group() {
+    use crate::session::config::SortOrder;
+
+    let instances = [instance_in("c1", "/tmp/c1", "parent/child")];
+    let mut env = seeded_env(test_home(), &instances, true);
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|_rows, groups| {
+            groups.clear();
+            Ok(())
+        })
+        .unwrap();
+    env.view.reload_storage_only().unwrap();
+    env.view.apply_sort_order(SortOrder::Custom);
+    let stored_groups = || {
+        Storage::open_unwatched("test")
+            .unwrap()
+            .load_with_groups()
+            .unwrap()
+            .1
+    };
+    assert!(
+        stored_groups().is_empty(),
+        "no stored group rows, which is the case under test"
+    );
+    let headers: Vec<String> = env
+        .view
+        .flat_items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Group { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        headers,
+        ["parent", "parent/child"],
+        "both headers are drawn from the one member's path"
+    );
+
+    let id = custom_order_id_of(&env.view, "c1");
+    env.view.cursor = env
+        .view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Session { id: row, .. } if *row == id))
+        .expect("c1 row");
+    env.view.update_selected();
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), None);
+
+    let (rows, _) = Storage::open_unwatched("test")
+        .unwrap()
+        .load_with_groups()
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.id == id)
+            .map(|r| r.group_path.clone()),
+        Some("parent".to_string()),
+        "the row lands in the implicit parent"
+    );
+    assert_eq!(
+        env.view.selected_session.as_deref(),
+        Some(id.as_str()),
+        "the selection follows it"
+    );
+    assert!(
+        matches!(env.view.flat_items.get(env.view.cursor), Some(Item::Session { id: row, .. }) if *row == id),
+        "and it is drawn under the cursor"
+    );
+
+    env.view.reload_storage_only().unwrap();
+    assert_eq!(
+        env.view
+            .get_instance(&id)
+            .map(|i| i.group_path.clone())
+            .as_deref(),
+        Some("parent"),
+        "the move survives a reload from disk"
+    );
+}
+
+/// Two profiles can hold groups with the same path. When the expansion write fails and the
+/// selection falls back to the destination's header, that has to be the header in the moving
+/// row's own profile: matching the path alone picks whichever profile is drawn first.
+#[test]
+#[serial]
+fn test_a_hidden_destination_falls_back_to_the_header_in_its_own_profile() {
+    use crate::session::config::SortOrder;
+
+    let (temp, guard) = test_home();
+    let (_temp, _guard) = (temp, guard);
+    seed_profile("alpha", &[instance_in("a1", "/tmp/a1", "bbb")]);
+    seed_profile(
+        "beta",
+        &[
+            instance_in("b1", "/tmp/b1", "aaa"),
+            instance_in("b2", "/tmp/b2", "bbb"),
+        ],
+    );
+    let mut view = test_view(None);
+    view.group_by = crate::session::config::GroupByMode::Manual;
+    view.apply_sort_order(SortOrder::Custom);
+    view.flat_items = view.build_flat_items();
+    view.update_selected();
+
+    let b1 = custom_order_id_of(&view, "b1");
+    let first_bbb = view.flat_items.iter().find_map(|i| match i {
+        Item::Group { path, profile, .. } if path == "bbb" => Some(profile.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        first_bbb,
+        Some(Some("alpha".to_string())),
+        "alpha's bbb is drawn first, so matching the path alone would land there"
+    );
+
+    // What a committed move of b1 into beta's bbb leaves behind when the write that would have
+    // opened the folded group failed.
+    Storage::open_unwatched("beta")
+        .unwrap()
+        .update(|rows, groups| {
+            if let Some(row) = rows.iter_mut().find(|r| r.id == b1) {
+                row.group_path = "bbb".to_string();
+            }
+            for group in groups.iter_mut() {
+                if group.path == "bbb" {
+                    group.collapsed = true;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    if let Some(row) = view.instances.get_mut(&b1) {
+        row.group_path = "bbb".to_string();
+    }
+    if let Some(tree) = view.group_trees.get_mut("beta") {
+        tree.set_collapsed("bbb", true);
+    }
+    view.selected_session = Some(b1.clone());
+
+    view.after_committed_cross_group_move(
+        &b1,
+        "bbb",
+        Err(anyhow::anyhow!("groups.json write failed")),
+    );
+
+    assert_eq!(view.selected_group.as_deref(), Some("bbb"));
+    assert_eq!(
+        view.selected_group_profile.as_deref(),
+        Some("beta"),
+        "the header the selection lands on is in the moving row's own profile"
+    );
+}
