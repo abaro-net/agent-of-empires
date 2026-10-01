@@ -725,14 +725,7 @@ mod tests {
         let storage = seed(&inst);
         assert!(park_pending_agent_title(&storage, &inst.id, "renamed").unwrap());
 
-        crate::agents::seed_agent_help_for_test(
-            "claude",
-            "  -n, --name <name>  Set a display name\n",
-        );
-        let agent = crate::agents::get_agent("claude");
-        let mut cmd = "claude".to_string();
-        super::super::launch_command::apply_display_name_for_test(&mut cmd, agent, &mut inst);
-        assert!(cmd.contains("--name"), "the launch line carried the title");
+        inst.display_name_launched = Some("renamed".to_string());
 
         let commit = |inst: &mut Instance| {
             inst.acquire_lifecycle_reservation(

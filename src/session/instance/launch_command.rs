@@ -43,17 +43,6 @@ fn apply_yolo_mode(cmd: &mut String, yolo: &crate::agents::YoloMode, is_sandboxe
     }
 }
 
-/// Test seam for the one caller outside this module: the park a launch retires is decided by
-/// whether the flag was actually appended.
-#[cfg(test)]
-pub(super) fn apply_display_name_for_test(
-    cmd: &mut String,
-    agent: Option<&crate::agents::AgentDef>,
-    inst: &mut Instance,
-) {
-    apply_display_name(cmd, agent, inst, None)
-}
-
 /// Append the agent's display-name flag, so a rename in AoE reaches the agent's own session
 /// name on its next start. Skipped for a command override: the user's argv may be a wrapper
 /// (`ssh -t host claude`), and the flag would land on the wrapper instead of the agent.
@@ -81,13 +70,13 @@ fn apply_display_name(
         return;
     }
     // The probe ran the agent the daemon's PATH finds, so it only speaks for a launch that
-    // runs that same binary.
-    let probed_binary_launches = match execution {
-        Some(execution) => execution
+    // runs that same binary. Without an attested execution the pane resolves a bare name
+    // through the login shell, which may find another install.
+    let probed_binary_launches = execution.is_some_and(|execution| {
+        execution
             .inputs
-            .runs_host_path_binary(agent.binary, &execution.program),
-        None => !environment_defines_path(&inst.resolved_host_environment()),
-    };
+            .runs_host_path_binary(agent.binary, &execution.program)
+    });
     if !probed_binary_launches {
         return;
     }
@@ -1004,6 +993,15 @@ mod tests {
     fn host_command(inst: &mut Instance) -> String {
         let agent = crate::agents::get_agent(&inst.tool);
         inst.build_host_command(agent, None).unwrap().0.unwrap()
+    }
+
+    fn attested_host_command(inst: &mut Instance) -> String {
+        let agent = crate::agents::get_agent(&inst.tool);
+        let execution = inst.resolve_native_execution(None).ok();
+        inst.build_host_command(agent, execution.as_ref())
+            .unwrap()
+            .0
+            .unwrap()
     }
 
     // The sidecar env var has to survive into the docker argv; no CI container would catch it.
@@ -2264,6 +2262,11 @@ mod tests {
         let _home = crate::session::test_support::isolate_home(temp_home.path());
         let project = temp_home.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
+        let _claude = crate::session::test_support::install_login_shell_path_command(
+            temp_home.path(),
+            "claude",
+            "#!/bin/sh\nexit 0\n",
+        );
 
         crate::agents::seed_agent_help_for_test(
             "claude",
@@ -2271,7 +2274,7 @@ mod tests {
         );
         let mut claude = tool_instance("claude", project.to_str().unwrap());
         claude.title = "O'Brien's plan".to_string();
-        let cmd = host_command(&mut claude);
+        let cmd = attested_host_command(&mut claude);
         let expected = format!("--name {}", shell_escape("O'Brien's plan"));
         assert!(
             cmd.contains(&expected),
@@ -2281,13 +2284,13 @@ mod tests {
         // An agent whose CLI has no verified name flag is untouched.
         let mut codex = tool_instance("codex", project.to_str().unwrap());
         codex.title = "plan".to_string();
-        assert!(!host_command(&mut codex).contains("--name"));
+        assert!(!attested_host_command(&mut codex).contains("--name"));
 
         // A command override may be a wrapper; the flag would land on the wrapper.
         let mut wrapped = tool_instance("claude", project.to_str().unwrap());
         wrapped.title = "plan".to_string();
         wrapped.command = "ssh -t host claude".to_string();
-        assert!(!host_command(&mut wrapped).contains("--name"));
+        assert!(!attested_host_command(&mut wrapped).contains("--name"));
     }
 
     /// Only `off` keeps the title off the launch line: `live` adds pane typing on top of the
@@ -2299,6 +2302,11 @@ mod tests {
         let _home = crate::session::test_support::isolate_home(temp_home.path());
         let project = temp_home.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
+        let _claude = crate::session::test_support::install_login_shell_path_command(
+            temp_home.path(),
+            "claude",
+            "#!/bin/sh\nexit 0\n",
+        );
 
         crate::agents::seed_agent_help_for_test(
             "claude",
@@ -2307,7 +2315,7 @@ mod tests {
         let mut claude = tool_instance("claude", project.to_str().unwrap());
         claude.title = "plan".to_string();
         assert!(
-            host_command(&mut claude).contains("--name"),
+            attested_host_command(&mut claude).contains("--name"),
             "the default carries it"
         );
 
@@ -2323,7 +2331,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                host_command(&mut claude).contains("--name"),
+                attested_host_command(&mut claude).contains("--name"),
                 expected,
                 "push_title = {mode}"
             );
@@ -2340,12 +2348,17 @@ mod tests {
         let _home = crate::session::test_support::isolate_home(temp_home.path());
         let project = temp_home.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
+        let _claude = crate::session::test_support::install_login_shell_path_command(
+            temp_home.path(),
+            "claude",
+            "#!/bin/sh\nexit 0\n",
+        );
 
         let mut claude = tool_instance("claude", project.to_str().unwrap());
         claude.title = "plan".to_string();
         crate::agents::seed_agent_help_for_test("claude", "  -r, --resume [value]  Resume\n");
         assert!(
-            !host_command(&mut claude).contains("--name"),
+            !attested_host_command(&mut claude).contains("--name"),
             "a help text with no name flag leaves the launch line alone"
         );
 
@@ -2354,7 +2367,7 @@ mod tests {
             "  -n, --name <name>  Set a display name\n",
         );
         assert!(
-            host_command(&mut claude).contains("--name"),
+            attested_host_command(&mut claude).contains("--name"),
             "and an install that advertises it gets it"
         );
     }
@@ -2369,6 +2382,11 @@ mod tests {
         let _home = crate::session::test_support::isolate_home(temp_home.path());
         let project = temp_home.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
+        let _claude = crate::session::test_support::install_login_shell_path_command(
+            temp_home.path(),
+            "claude",
+            "#!/bin/sh\nexit 0\n",
+        );
         crate::agents::seed_agent_help_for_test(
             "claude",
             "  -n, --name <name>  Set a display name\n",
@@ -2377,12 +2395,12 @@ mod tests {
         let mut claude = tool_instance("claude", project.to_str().unwrap());
         claude.title = "plan".to_string();
         assert!(
-            host_command(&mut claude).contains("--name"),
+            attested_host_command(&mut claude).contains("--name"),
             "the same session without a terminator is named"
         );
 
         claude.extra_args = "--".to_string();
-        let command = host_command(&mut claude);
+        let command = attested_host_command(&mut claude);
         assert!(
             !command.contains("--name"),
             "the title would follow `--` as a prompt: {command}"
@@ -2390,16 +2408,21 @@ mod tests {
         assert_eq!(claude.display_name_launched, None);
     }
 
-    /// The probe ran the agent the daemon's PATH finds, so a launch whose environment sets its
-    /// own PATH may run another install, one older than the flag: it is launched without it,
-    /// and nothing is recorded as delivered.
+    /// The probe speaks for the binary the daemon's PATH resolves, so only a launch with an
+    /// attested execution of that binary is named. Without one the pane resolves a bare name
+    /// through the login shell, which may find an older install that rejects the flag.
     #[test]
     #[serial_test::serial]
-    fn a_launch_with_its_own_path_is_not_vouched_for_by_the_probe() {
+    fn a_launch_without_an_attested_execution_is_not_named() {
         let temp_home = tempfile::tempdir().unwrap();
         let _home = crate::session::test_support::isolate_home(temp_home.path());
         let project = temp_home.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
+        let _claude = crate::session::test_support::install_login_shell_path_command(
+            temp_home.path(),
+            "claude",
+            "#!/bin/sh\nexit 0\n",
+        );
         crate::agents::seed_agent_help_for_test(
             "claude",
             "  -n, --name <name>  Set a display name\n",
@@ -2408,11 +2431,10 @@ mod tests {
         let mut claude = tool_instance("claude", project.to_str().unwrap());
         claude.title = "plan".to_string();
         assert!(
-            host_command(&mut claude).contains("--name"),
-            "the same session on the daemon's PATH is named"
+            attested_host_command(&mut claude).contains("--name"),
+            "the attested launch is named"
         );
 
-        claude.pending_host_env = vec![("PATH".to_string(), "/opt/old-claude/bin".to_string())];
         let command = host_command(&mut claude);
         assert!(!command.contains("--name"), "{command}");
         assert_eq!(claude.display_name_launched, None);
@@ -2427,6 +2449,11 @@ mod tests {
         let _home = crate::session::test_support::isolate_home(temp_home.path());
         let project = temp_home.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
+        let _claude = crate::session::test_support::install_login_shell_path_command(
+            temp_home.path(),
+            "claude",
+            "#!/bin/sh\nexit 0\n",
+        );
 
         crate::agents::seed_agent_help_for_test(
             "claude",
@@ -2436,7 +2463,7 @@ mod tests {
         for (title, passed) in [("wip", true), ("-wip", false), ("--dry-run notes", false)] {
             claude.title = title.to_string();
             assert_eq!(
-                host_command(&mut claude).contains("--name"),
+                attested_host_command(&mut claude).contains("--name"),
                 passed,
                 "title {title:?}"
             );
@@ -2452,6 +2479,11 @@ mod tests {
         let _home = crate::session::test_support::isolate_home(temp_home.path());
         let project = temp_home.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
+        let _claude = crate::session::test_support::install_login_shell_path_command(
+            temp_home.path(),
+            "claude",
+            "#!/bin/sh\nexit 0\n",
+        );
 
         crate::agents::seed_agent_help_for_test(
             "claude",
@@ -2464,7 +2496,7 @@ mod tests {
             !claude.has_command_override(),
             "the fixture is not an override"
         );
-        let cmd = host_command(&mut claude);
+        let cmd = attested_host_command(&mut claude);
         assert!(
             cmd.contains(&format!("--name {}", shell_escape("night shift"))),
             "the custom-command branch names it too: {cmd}"
