@@ -294,22 +294,55 @@ impl HomeView {
         // A collapsed destination would hide the row it just received: the cursor could not
         // follow it, and the next move would act on a session that is no longer on screen.
         let revealed = self.reveal_group(&profile, &target);
-        self.after_committed_cross_group_move(revealed);
+        self.after_committed_cross_group_move(id, &target, revealed);
         Ok(())
     }
 
     /// Settle the list after a move that is already stored. The row has changed group on disk
     /// whatever the expansion write did, so the list is rebuilt either way: returning early on
     /// that error would leave the cursor on a row the store places elsewhere.
-    pub(super) fn after_committed_cross_group_move(&mut self, revealed: anyhow::Result<()>) {
+    pub(super) fn after_committed_cross_group_move(
+        &mut self,
+        id: &str,
+        target: &str,
+        revealed: anyhow::Result<()>,
+    ) {
         self.rebuild_flat_items_keeping_cursor();
-        if let Err(error) = revealed {
-            tracing::warn!(
-                target: "tui.reorder",
-                error = %error,
-                "expanding the destination group failed after a move"
-            );
-            self.flash_status("Moved, but the destination group stayed collapsed");
+        let Err(error) = revealed else {
+            return;
+        };
+        tracing::warn!(
+            target: "tui.reorder",
+            error = %error,
+            "expanding the destination group failed after a move"
+        );
+        self.flash_status("Moved, but the destination group stayed collapsed");
+        // The row went into a group that never opened, so the selection is on a session the
+        // list is not drawing: follow it as far as the header it went under.
+        if self
+            .flat_items
+            .iter()
+            .any(|item| matches!(item, Item::Session { id: row, .. } if row == id))
+        {
+            return;
+        }
+        if let Some(at) = self
+            .flat_items
+            .iter()
+            .position(|item| matches!(item, Item::Group { path, .. } if path == target))
+        {
+            self.cursor = at;
+            self.update_selected();
+        }
+    }
+
+    /// The one profile in play, when there is only one. A unified view over a single profile
+    /// draws its headers unqualified, and an empty group has no member session to infer an
+    /// owner from, so without this a stored group with no rows could not be moved at all.
+    fn sole_storage_profile(&self) -> Option<String> {
+        match self.storages.len() {
+            1 => self.storages.keys().next().cloned(),
+            _ => None,
         }
     }
 
@@ -363,6 +396,7 @@ impl HomeView {
             .selected_group_profile
             .clone()
             .or_else(|| self.active_profile.clone())
+            .or_else(|| self.sole_storage_profile())
         else {
             return Ok(());
         };

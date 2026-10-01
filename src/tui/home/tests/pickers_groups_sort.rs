@@ -2616,8 +2616,11 @@ fn test_a_failed_expansion_still_settles_the_list() {
         row.group_path = "bbb".to_string();
     }
 
-    env.view
-        .after_committed_cross_group_move(Err(anyhow::anyhow!("groups.json write failed")));
+    env.view.after_committed_cross_group_move(
+        &a,
+        "bbb",
+        Err(anyhow::anyhow!("groups.json write failed")),
+    );
 
     let header = env
         .view
@@ -2678,5 +2681,189 @@ fn test_a_boundary_move_rechecks_the_anchor_against_the_store() {
             .map(|r| r.group_path.clone()),
         Some("other".to_string()),
         "the peer's grouping stands"
+    );
+}
+
+fn stored_group_order(profile: &str) -> Vec<String> {
+    Storage::open_unwatched(profile)
+        .unwrap()
+        .load_with_groups()
+        .unwrap()
+        .1
+        .into_iter()
+        .map(|group| group.path)
+        .collect()
+}
+
+/// A unified view over a single profile draws its headers unqualified, and a stored group with
+/// no sessions has no member to infer an owner from. Without the sole store resolved
+/// explicitly the move had no profile to write to and did nothing at all.
+#[test]
+#[serial]
+fn test_an_empty_group_moves_in_a_unified_single_profile_view() {
+    use crate::session::config::SortOrder;
+
+    let (temp, guard) = test_home();
+    let (_temp, _guard) = (temp, guard);
+    seed_profile("test", &[]);
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|_rows, groups| {
+            *groups = ["alpha", "beta"]
+                .into_iter()
+                .map(|path| Group {
+                    name: path.to_string(),
+                    path: path.to_string(),
+                    collapsed: false,
+                    archived_at: None,
+                    children: Vec::new(),
+                })
+                .collect();
+            Ok(())
+        })
+        .unwrap();
+
+    let mut view = test_view(None);
+    assert!(view.active_profile.is_none(), "a unified view");
+    view.group_by = crate::session::config::GroupByMode::Manual;
+    view.apply_sort_order(SortOrder::Custom);
+    view.flat_items = view.build_flat_items();
+    view.update_selected();
+
+    let at = view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Group { path, .. } if path == "beta"))
+        .expect("the beta header is drawn");
+    view.cursor = at;
+    view.update_selected();
+    assert_eq!(view.selected_group.as_deref(), Some("beta"));
+    assert!(
+        view.selected_group_profile.is_none(),
+        "an empty group's header carries no profile, which is the case under test"
+    );
+
+    view.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), None);
+
+    assert_eq!(
+        stored_group_order("test"),
+        ["beta", "alpha"],
+        "the move reached the only store there is"
+    );
+}
+
+/// When the destination stays collapsed because its expansion write failed, the moved row is
+/// not drawn. Leaving the selection on it would point the cursor at a session the list does
+/// not show, so it falls back to the header the row went under.
+#[test]
+#[serial]
+fn test_a_hidden_destination_moves_the_selection_to_its_header() {
+    use crate::session::config::SortOrder;
+
+    let instances = [
+        instance_in("a1", "/tmp/a1", "aaa"),
+        instance_in("b1", "/tmp/b1", "bbb"),
+    ];
+    let mut env = seeded_env(test_home(), &instances, true);
+    env.view.apply_sort_order(SortOrder::Custom);
+    let a = custom_order_id_of(&env.view, "a1");
+
+    // What a committed cross-group move leaves behind when the destination is folded and the
+    // write that would have opened it failed.
+    Storage::open_unwatched("test")
+        .unwrap()
+        .update(|rows, groups| {
+            if let Some(row) = rows.iter_mut().find(|r| r.id == a) {
+                row.group_path = "bbb".to_string();
+            }
+            for group in groups.iter_mut() {
+                if group.path == "bbb" {
+                    group.collapsed = true;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    if let Some(row) = env.view.instances.get_mut(&a) {
+        row.group_path = "bbb".to_string();
+    }
+    if let Some(tree) = env.view.group_trees.get_mut("test") {
+        tree.set_collapsed("bbb", true);
+    }
+    env.view.selected_session = Some(a.clone());
+
+    env.view.after_committed_cross_group_move(
+        &a,
+        "bbb",
+        Err(anyhow::anyhow!("groups.json write failed")),
+    );
+
+    assert!(
+        !env.view
+            .flat_items
+            .iter()
+            .any(|i| matches!(i, Item::Session { id, .. } if *id == a)),
+        "the row is inside the folded group, so it is not drawn"
+    );
+    assert_eq!(
+        env.view.selected_group.as_deref(),
+        Some("bbb"),
+        "the selection follows it as far as the header"
+    );
+    assert!(
+        matches!(env.view.flat_items.get(env.view.cursor), Some(Item::Group { path, .. }) if path == "bbb"),
+        "and the cursor sits on that header"
+    );
+    assert!(env.view.selected_session.is_none());
+}
+
+/// Ctrl+Alt+arrow is nobody's chord here, so it must not act as the jump keys do: the jump is
+/// Alt alone, and treating Ctrl+Alt as one would move the cursor off a session whose relay was
+/// meant to receive the keystroke.
+#[test]
+#[serial]
+fn test_ctrl_alt_arrows_do_not_jump_out_of_live_send() {
+    use crate::session::Status;
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    let mut env = create_test_env_with_mixed_sessions();
+    env.view.idle_decay_window = std::time::Duration::from_secs(30 * 60);
+    let ids: Vec<String> = env
+        .view
+        .flat_items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Session { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(ids.len() >= 3);
+
+    // The same fixture the Alt+Down jump lands on, so a jump here would be unmistakable.
+    env.view
+        .apply_user_action(&ids[2], |inst| {
+            inst.status = Status::Idle;
+            inst.idle_entered_at = Some(Utc::now() - ChronoDuration::minutes(1));
+        })
+        .unwrap();
+    env.view.rebuild_flat_items();
+    env.view.cursor = 0;
+    env.view.update_selected();
+    let before = env.view.selected_session.clone();
+    env.view.live_send = Some(live_send_state(&ids[0], "relaying", "aoe_test_ctrl_alt"));
+
+    env.view.handle_key(
+        KeyEvent::new(KeyCode::Down, KeyModifiers::ALT | KeyModifiers::CONTROL),
+        None,
+    );
+
+    assert_eq!(
+        env.view.selected_session, before,
+        "Ctrl+Alt+Down is not the jump chord, so the cursor stays put"
+    );
+    assert_ne!(
+        env.view.selected_session,
+        Some(ids[2].clone()),
+        "and in particular it did not land on the just-finished session"
     );
 }

@@ -428,7 +428,9 @@ fn slice_line_columns(line: &ratatui::text::Line, from: u16, to_excl: u16, width
 
 /// `Alt+Up` / `Alt+Down`: the direction they walk the list, or `None` for any other key.
 fn jump_delta_for(key: &KeyEvent) -> Option<isize> {
-    if !key.modifiers.contains(KeyModifiers::ALT) {
+    // The bound chord is Alt alone. Ctrl+Alt+arrow is not one of ours, so inside live send it
+    // stays with the pane instead of breaking the relay.
+    if !key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) {
         return None;
     }
     match key.code {
