@@ -1,6 +1,8 @@
-// Sidebar triage against a real server (#1581): pin, archive, snooze, and bulk archive.
+// Sidebar triage against a real server (#1581): pin, archive, snooze, bulk archive, and a snoozed session waking.
 
 import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect, type ServeHandle } from "../helpers/liveTest";
 import { listSessions, seedSessionViaAoeAdd } from "../helpers/aoeServe";
@@ -186,4 +188,49 @@ test("selecting two rows and bulk-archiving persists both", async ({ page, spawn
     .toBe(2);
   await expect(selected).toHaveCount(0, { timeout: 5_000 });
   await expect(page.locator("[data-testid='sidebar-sunk-section']")).toBeVisible({ timeout: 5_000 });
+});
+
+// Prints a permission prompt once the test drops `.wake` in the project dir. The cursor on the first option is what
+// the detector reads as a menu, so the prompt counts as Waiting.
+const promptOnWake = `#!/bin/bash
+echo "working"
+until [ -e .wake ]; do sleep 0.2; done
+echo 'Do you want to proceed?'
+echo '\u276f 1. Yes'
+echo "2. Yes, and don't ask again"
+echo '3. No'
+while true; do sleep 1; done
+`;
+
+test("a snoozed session that starts waiting wakes out of the sunk section", async ({ page, spawnServe }) => {
+  const title = "wake-target";
+  const { serve, sessionId, row } = await openWithSession(
+    page,
+    () => spawnServe({ seedFn: seedSessionViaAoeAdd({ title, agentScript: promptOnWake }) }),
+    title,
+  );
+  const ensured = await fetch(`${serve.baseUrl}/api/sessions/${sessionId}/ensure`, { method: "POST" });
+  expect(ensured.ok).toBe(true);
+  await expect.poll(field(serve, "status"), { timeout: 15_000 }).not.toMatch(/^(Stopped|Error|Starting|Waiting)$/);
+
+  const snoozed = await fetch(`${serve.baseUrl}/api/sessions/${sessionId}/snooze`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ minutes: 60 }),
+  });
+  expect(snoozed.ok).toBe(true);
+  const sunkSection = page.locator("[data-testid='sidebar-sunk-section']");
+  await expect(sunkSection).toBeVisible({ timeout: 10_000 });
+  const toggle = sunkSection.locator("[data-testid='sidebar-sunk-toggle']");
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+  await expect(sunkSection.locator("[data-testid='sidebar-session-row']")).toContainText(title);
+  await expect(sunkSection.locator("[aria-label='Snoozed']")).toBeVisible();
+  expect(await field(serve, "status")()).not.toBe("Waiting");
+
+  writeFileSync(join(serve.home, "project", ".wake"), "");
+  await expect.poll(field(serve, "status"), { timeout: 15_000 }).toBe("Waiting");
+  await expect.poll(field(serve, "snoozed_until"), { timeout: 10_000 }).toBeNull();
+  await expect(sunkSection).toHaveCount(0, { timeout: 10_000 });
+  await expect(row).toContainText(title);
+  await expect(row.locator("[aria-label='Snoozed']")).toHaveCount(0);
 });

@@ -3899,6 +3899,13 @@
       "components": ["web/src/components/WorkspaceSidebar.tsx"]
     },
     {
+      "id": "triage.snooze-wakes-on-waiting",
+      "kind": "live-playwright",
+      "risk": "high",
+      "specs": ["tests/live/triage.spec.ts"],
+      "components": ["web/src/components/WorkspaceSidebar.tsx"]
+    },
+    {
       "id": "triage.api-wire-format",
       "kind": "vitest",
       "risk": "medium",
