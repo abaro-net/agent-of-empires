@@ -612,14 +612,14 @@ impl HomeView {
                         && !is_live_target
                         && !already_unread;
 
-                    // One flock for both the status/timestamp patch and the unread mark,
-                    // matching the daemon's per-tick batching instead of two `Storage::update`
-                    // calls on the same row.
                     // Terminal rows only, like the unread mark.
                     let wake = !structured
                         && self
                             .get_instance(&update.id)
                             .is_some_and(|i| i.wakes_from_snooze(old));
+                    // One flock for both the status/timestamp patch and the unread mark,
+                    // matching the daemon's per-tick batching instead of two `Storage::update`
+                    // calls on the same row.
                     self.persist_passive_status_transition(&update.id, should_mark_unread, wake);
                     if should_mark_unread {
                         self.mutate_instance(&update.id, |inst| inst.mark_unread());

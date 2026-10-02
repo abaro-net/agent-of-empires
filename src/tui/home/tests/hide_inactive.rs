@@ -600,3 +600,28 @@ fn snoozing_the_selected_session_while_hidden_keeps_the_selection_in_its_group()
         "the cursor follows the woken row"
     );
 }
+
+/// The TUI wakes only terminal rows; a structured session's status and unread mark belong to
+/// the daemon's ACP path, so a waiting one stays snoozed here.
+#[test]
+#[serial]
+fn a_snoozed_structured_session_is_not_woken_by_the_tui() {
+    let mut acp = snoozed(with_status(
+        instance_in("util-acp", "/tmp/util", "util"),
+        Status::Running,
+    ));
+    acp.tool = "claude".into();
+    acp.view = crate::session::View::Structured;
+    let id = acp.id.clone();
+    let mut env = seeded_env(test_home(), &[acp], true);
+
+    env.view
+        .apply_status_updates_without_hooks(vec![status_update(
+            &id,
+            Status::Waiting,
+            crate::tui::status_poller::IdleIntent::Keep,
+        )]);
+    let inst = env.view.get_instance(&id).unwrap();
+    assert_eq!(inst.status, Status::Waiting, "the update itself applied");
+    assert!(inst.is_snoozed());
+}
