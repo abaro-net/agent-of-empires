@@ -625,3 +625,114 @@ fn a_snoozed_structured_session_is_not_woken_by_the_tui() {
     assert_eq!(inst.status, Status::Waiting, "the update itself applied");
     assert!(inst.is_snoozed());
 }
+
+fn waiting(env: &mut TestEnv, id: &str) {
+    env.view
+        .apply_status_updates_without_hooks(vec![status_update(
+            id,
+            Status::Waiting,
+            crate::tui::status_poller::IdleIntent::Keep,
+        )]);
+}
+
+fn disk_snooze(id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    Storage::new_unwatched("test")
+        .unwrap()
+        .load()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.id == id)
+        .unwrap()
+        .snoozed_until
+}
+
+fn env_with_snoozed_watcher() -> (TestEnv, String) {
+    let watcher = snoozed(with_status(
+        instance_in("util-watcher", "/tmp/util", "util"),
+        Status::Running,
+    ));
+    let id = watcher.id.clone();
+    let mut env = seeded_env(
+        test_home(),
+        &[
+            with_status(instance_in("util-live", "/tmp/util", "util"), Status::Idle),
+            watcher,
+        ],
+        true,
+    );
+    press_y(&mut env);
+    (env, id)
+}
+
+/// A snooze set elsewhere after this TUI last loaded the row survives the wake.
+#[test]
+#[serial]
+fn a_wake_leaves_a_snooze_set_elsewhere_alone() {
+    let (mut env, id) = env_with_snoozed_watcher();
+    let newer =
+        env.view.get_instance(&id).unwrap().snoozed_until.unwrap() + chrono::Duration::minutes(30);
+    Storage::new_unwatched("test")
+        .unwrap()
+        .update(|insts, _| {
+            insts.iter_mut().find(|i| i.id == id).unwrap().snoozed_until = Some(newer);
+            Ok(())
+        })
+        .unwrap();
+
+    waiting(&mut env, &id);
+
+    assert_eq!(disk_snooze(&id), Some(newer));
+    assert!(!session_titles(&env.view).contains(&"util-watcher".to_string()));
+}
+
+/// A wake whose write fails stays pending and lands on a later poll, with no second edge into
+/// Waiting; until then the session stays hidden, so screen and disk agree.
+#[test]
+#[serial]
+fn a_wake_that_failed_to_persist_lands_on_a_later_poll() {
+    let (mut env, id) = env_with_snoozed_watcher();
+    let sessions = crate::session::get_profile_dir("test")
+        .unwrap()
+        .join("sessions.json");
+    let parked = sessions.with_extension("json.parked");
+    std::fs::rename(&sessions, &parked).unwrap();
+    std::fs::create_dir(&sessions).unwrap();
+
+    waiting(&mut env, &id);
+    assert!(!session_titles(&env.view).contains(&"util-watcher".to_string()));
+
+    std::fs::remove_dir(&sessions).unwrap();
+    std::fs::rename(&parked, &sessions).unwrap();
+    waiting(&mut env, &id);
+
+    assert!(session_titles(&env.view).contains(&"util-watcher".to_string()));
+    assert_eq!(disk_snooze(&id), None);
+}
+
+/// A session menu closes when its session drops out under it, rather than acting on the group
+/// header the selection falls back to.
+#[test]
+#[serial]
+fn a_session_menu_closes_when_its_session_is_hidden() {
+    let mut env = env_with_stopped(true);
+    press_y(&mut env);
+    let id = select_session(&mut env, "util-live");
+    env.view.list_inner_area = ratatui::layout::Rect::new(1, 1, 28, 20);
+    env.view.list_area = ratatui::layout::Rect::new(0, 0, 30, 22);
+    assert!(env
+        .view
+        .handle_right_click(5, env.view.list_inner_area.y + env.view.cursor as u16));
+    assert!(env.view.context_menu.is_some());
+
+    Storage::new_unwatched("test")
+        .unwrap()
+        .update(|insts, _| {
+            insts.iter_mut().find(|i| i.id == id).unwrap().snooze(60);
+            Ok(())
+        })
+        .unwrap();
+    env.view.reload_storage_only().unwrap();
+
+    assert_eq!(env.view.selected_group.as_deref(), Some("util"));
+    assert!(env.view.context_menu.is_none());
+}

@@ -252,6 +252,9 @@ pub struct HomeView {
 
     pub(super) status_poller: StatusPoller,
     pub(super) pending_status_refresh: bool,
+    /// Snoozed sessions that started waiting on the user, with the snooze each wake observed,
+    /// until the wake is on disk or the snooze changes.
+    pub(super) pending_wakes: HashMap<String, chrono::DateTime<chrono::Utc>>,
 
     pub(super) show_diagnostics: bool,
     pub(super) metrics_poller: super::metrics_poller::MetricsPoller,

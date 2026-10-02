@@ -431,12 +431,7 @@ impl HomeView {
     /// `mark_unread` folds the Running -> Idle unread mark into the same `Storage::update`
     /// instead of a second flock round-trip on the same row in the same tick, matching the
     /// daemon's per-tick batching. Terminal rows only; see the `is_structured()` return.
-    pub(in crate::tui) fn persist_passive_status_transition(
-        &self,
-        id: &str,
-        mark_unread: bool,
-        wake: bool,
-    ) {
+    pub(in crate::tui) fn persist_passive_status_transition(&self, id: &str, mark_unread: bool) {
         let Some(inst) = self.instances.get(id) else {
             return;
         };
@@ -465,9 +460,6 @@ impl HomeView {
                 if mark_unread {
                     disk.mark_unread();
                 }
-                if wake {
-                    disk.unsnooze();
-                }
             }
             Ok(())
         }) {
@@ -485,5 +477,37 @@ impl HomeView {
                 "persist_passive_status_transition failed: {e}"
             );
         }
+    }
+
+    /// Clear `id`'s snooze on disk if it is still the one the wake observed. `Ok(false)` means
+    /// a newer snooze, or none, was there and is left alone; `Err` means the write failed.
+    pub(in crate::tui) fn persist_wake(
+        &self,
+        id: &str,
+        observed: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, ()> {
+        let Some(storage) = self
+            .instances
+            .get(id)
+            .and_then(|inst| self.storages.get(&inst.source_profile))
+        else {
+            return Ok(false);
+        };
+        let mut woke = false;
+        storage
+            .update(|insts, _groups| {
+                if let Some(disk) = insts.iter_mut().find(|i| i.id == id) {
+                    woke = disk.wake_from_snooze(observed);
+                }
+                Ok(())
+            })
+            .map_err(|e| {
+                tracing::warn!(
+                    target: "session.store",
+                    session_id = %id,
+                    "persist_wake failed: {e}"
+                );
+            })?;
+        Ok(woke)
     }
 }

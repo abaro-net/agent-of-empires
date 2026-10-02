@@ -344,6 +344,7 @@ impl HomeView {
             available_tools,
             status_poller: StatusPoller::new(),
             pending_status_refresh: false,
+            pending_wakes: HashMap::new(),
             show_diagnostics: resolved.session.show_diagnostics_pane,
             metrics_poller: crate::tui::metrics_poller::MetricsPoller::new(),
             pending_metrics_refresh: false,

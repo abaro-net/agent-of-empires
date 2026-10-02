@@ -55,6 +55,7 @@ impl HomeView {
                 for update in updates {
                     self.apply_one_status_update(update);
                 }
+                self.flush_pending_wakes();
                 self.pending_status_refresh = false;
                 true
             }
@@ -509,6 +510,40 @@ impl HomeView {
         for update in updates {
             self.apply_status_update(update, false, false);
         }
+        self.flush_pending_wakes();
+    }
+
+    /// Write each pending wake, and show a session again only once its wake is on disk. A
+    /// failed write stays pending for the next poll, since the edge into Waiting that queued
+    /// it does not recur; a wake whose snooze has changed is dropped.
+    fn flush_pending_wakes(&mut self) {
+        if self.pending_wakes.is_empty() {
+            return;
+        }
+        let mut woke = false;
+        for (id, observed) in std::mem::take(&mut self.pending_wakes) {
+            if self
+                .get_instance(&id)
+                .is_none_or(|i| i.snoozed_until != Some(observed))
+            {
+                continue;
+            }
+            match self.persist_wake(&id, observed) {
+                Ok(true) => {
+                    self.mutate_instance(&id, |inst| {
+                        inst.wake_from_snooze(observed);
+                    });
+                    woke = true;
+                }
+                Ok(false) => {}
+                Err(()) => {
+                    self.pending_wakes.insert(id, observed);
+                }
+            }
+        }
+        if woke {
+            self.rebuild_flat_items_keeping_cursor();
+        }
     }
 
     pub(in crate::tui) fn reset_status_refresh(&mut self) {
@@ -613,20 +648,19 @@ impl HomeView {
                         && !already_unread;
 
                     // Terminal rows only, like the unread mark.
-                    let wake = !structured
-                        && self
-                            .get_instance(&update.id)
-                            .is_some_and(|i| i.wakes_from_snooze(old));
+                    let wake = self
+                        .get_instance(&update.id)
+                        .filter(|_| !structured)
+                        .and_then(|i| i.wakes_from_snooze(old));
                     // One flock for both the status/timestamp patch and the unread mark,
                     // matching the daemon's per-tick batching instead of two `Storage::update`
                     // calls on the same row.
-                    self.persist_passive_status_transition(&update.id, should_mark_unread, wake);
+                    self.persist_passive_status_transition(&update.id, should_mark_unread);
                     if should_mark_unread {
                         self.mutate_instance(&update.id, |inst| inst.mark_unread());
                     }
-                    if wake {
-                        self.mutate_instance(&update.id, |inst| inst.unsnooze());
-                        self.rebuild_flat_items_keeping_cursor();
+                    if let Some(observed) = wake {
+                        self.pending_wakes.insert(update.id.clone(), observed);
                     }
 
                     if let Some(inst) = self.get_instance(&update.id).cloned() {

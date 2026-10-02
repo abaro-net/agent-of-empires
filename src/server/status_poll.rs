@@ -24,9 +24,9 @@ pub(super) struct PassiveTransitionDecision {
     patch: Option<crate::session::PassiveStatusPatch>,
     /// Always `false` for structured / ACP sessions.
     mark_unread: bool,
-    /// A snoozed session that just started waiting on the user. Always `false` for
+    /// The snooze of a session that just started waiting on the user. Always `None` for
     /// structured / ACP sessions.
-    wake: bool,
+    wake: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Compute the passive-status write decision for one instance whose `status` differs from
@@ -44,7 +44,9 @@ pub(super) fn decide_passive_transition(
         && old_status == Status::Running
         && inst.status == Status::Idle
         && !inst.unread;
-    let wake = !inst.is_structured() && inst.wakes_from_snooze(old_status);
+    let wake = (!inst.is_structured())
+        .then(|| inst.wakes_from_snooze(old_status))
+        .flatten();
     PassiveTransitionDecision {
         patch,
         mark_unread,
@@ -58,29 +60,60 @@ pub(super) struct PassiveTransitionWrites {
     /// Keyed by instance id for O(1) lookup inside the persist closure.
     patches: std::collections::HashMap<String, crate::session::PassiveStatusPatch>,
     unread_ids: Vec<String>,
-    /// Snoozed sessions that just started waiting on the user.
-    wake_ids: Vec<String>,
+    /// Snoozed sessions that started waiting on the user, keyed by id, with the snooze each
+    /// wake observed.
+    wakes: PendingWakes,
 }
 
-/// Flush one tick's per-profile passive-status writes.
+/// Wakes keyed by session id, with the snooze each one observed.
+pub(super) type PendingWakes = std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>;
+
+/// Queue the wakes a failed flush left behind into this tick's bundles, dropping any whose
+/// session is gone or whose snooze has changed since the wake observed it.
+pub(super) fn requeue_pending_wakes(
+    pending: PendingWakes,
+    instances: &[Instance],
+    bundles: &mut std::collections::HashMap<String, PassiveTransitionWrites>,
+) {
+    for (id, observed) in pending {
+        let Some(inst) = instances.iter().find(|i| i.id == id) else {
+            continue;
+        };
+        if inst.snoozed_until != Some(observed) {
+            continue;
+        }
+        bundles
+            .entry(inst.source_profile.clone())
+            .or_default()
+            .wakes
+            .entry(id)
+            .or_insert(observed);
+    }
+}
+
+/// Flush one tick's per-profile passive-status writes. Returns the wakes whose write failed,
+/// for the next tick to retry: the edge into Waiting that triggered them does not recur.
 pub(super) async fn flush_passive_transition_writes(
     file_watch: std::sync::Arc<crate::file_watch::FileWatchService>,
     instances: &mut [Instance],
     bundles: std::collections::HashMap<String, PassiveTransitionWrites>,
-) {
+) -> PendingWakes {
+    let mut failed_wakes = PendingWakes::new();
     for (
         profile,
         PassiveTransitionWrites {
             patches,
             unread_ids,
-            wake_ids,
+            wakes,
         },
     ) in bundles
     {
-        // The closure moves `unread_ids` and `wake_ids`; keep copies to mirror into the
-        // live vec once the write is durable.
+        // The closure moves `unread_ids` and `wakes`; keep copies to mirror into the live
+        // vec once the write is durable.
         let unread_ids_for_local = unread_ids.clone();
-        let wake_ids_for_local = wake_ids.clone();
+        let wakes_for_retry = wakes.clone();
+        let woken = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let woken_in_write = woken.clone();
         let patch_count = patches.len();
         let unread_count = unread_ids.len();
         let persisted = api::persist_session_update(
@@ -88,6 +121,7 @@ pub(super) async fn flush_passive_transition_writes(
             "passive-status",
             file_watch.clone(),
             move |insts| {
+                let mut woken = woken_in_write.lock().unwrap_or_else(|e| e.into_inner());
                 for inst in insts.iter_mut() {
                     if let Some((id, patch)) = patches.get_key_value(&inst.id) {
                         inst.merge_passive_status_patch(id, patch);
@@ -95,8 +129,10 @@ pub(super) async fn flush_passive_transition_writes(
                     if unread_ids.contains(&inst.id) {
                         inst.mark_unread();
                     }
-                    if wake_ids.contains(&inst.id) {
-                        inst.unsnooze();
+                    if let Some(observed) = wakes.get(&inst.id) {
+                        if inst.wake_from_snooze(*observed) {
+                            woken.push(inst.id.clone());
+                        }
                     }
                 }
             },
@@ -111,17 +147,21 @@ pub(super) async fn flush_passive_transition_writes(
             ok = persisted.is_ok(),
             "persisted passive-status batch"
         );
-        if persisted.is_ok() {
-            for inst in instances.iter_mut() {
-                if unread_ids_for_local.contains(&inst.id) {
-                    inst.mark_unread();
-                }
-                if wake_ids_for_local.contains(&inst.id) {
-                    inst.unsnooze();
-                }
+        if persisted.is_err() {
+            failed_wakes.extend(wakes_for_retry);
+            continue;
+        }
+        let woken = std::mem::take(&mut *woken.lock().unwrap_or_else(|e| e.into_inner()));
+        for inst in instances.iter_mut() {
+            if unread_ids_for_local.contains(&inst.id) {
+                inst.mark_unread();
+            }
+            if woken.contains(&inst.id) {
+                inst.unsnooze();
             }
         }
     }
+    failed_wakes
 }
 
 /// Drop entries whose session id is no longer live from the persistent per-session
@@ -161,6 +201,7 @@ pub(super) async fn status_poll_loop(state: Arc<AppState>) {
     // Per-session capacity-deferred marker.
     let mut acp_capacity_deferred: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    let mut pending_wakes = PendingWakes::new();
     loop {
         interval.tick().await;
 
@@ -251,15 +292,15 @@ pub(super) async fn status_poll_loop(state: Arc<AppState>) {
                     at: now,
                 });
                 let decision = decide_passive_transition(inst, old, unread_enabled);
-                if decision.patch.is_none() && !decision.mark_unread && !decision.wake {
+                if decision.patch.is_none() && !decision.mark_unread && decision.wake.is_none() {
                     continue;
                 }
                 let bundle = bundles.entry(inst.source_profile.clone()).or_default();
                 if let Some(patch) = decision.patch {
                     bundle.patches.insert(inst.id.clone(), patch);
                 }
-                if decision.wake {
-                    bundle.wake_ids.push(inst.id.clone());
+                if let Some(observed) = decision.wake {
+                    bundle.wakes.insert(inst.id.clone(), observed);
                 }
                 if decision.mark_unread {
                     // Record the id only; the in-memory mark on `instances` is deferred to
@@ -268,8 +309,10 @@ pub(super) async fn status_poll_loop(state: Arc<AppState>) {
                     bundle.unread_ids.push(inst.id.clone());
                 }
             }
-            flush_passive_transition_writes(state.file_watch.clone(), &mut instances, bundles)
-                .await;
+            requeue_pending_wakes(std::mem::take(&mut pending_wakes), &instances, &mut bundles);
+            pending_wakes =
+                flush_passive_transition_writes(state.file_watch.clone(), &mut instances, bundles)
+                    .await;
 
             reload_state_instances_from_disk(
                 &state,
@@ -424,26 +467,28 @@ mod tests {
         let mut inst = Instance::new("watcher", "/tmp/watcher");
         inst.snooze(60);
         inst.status = Status::Waiting;
-        assert!(decide_passive_transition(&inst, Status::Running, true).wake);
+        assert_eq!(
+            decide_passive_transition(&inst, Status::Running, true).wake,
+            inst.snoozed_until
+        );
         inst.status = Status::Idle;
         assert!(
-            !decide_passive_transition(&inst, Status::Running, true).wake,
+            decide_passive_transition(&inst, Status::Running, true)
+                .wake
+                .is_none(),
             "a finished turn leaves it snoozed"
         );
         inst.status = Status::Waiting;
         inst.view = crate::session::View::Structured;
-        assert!(!decide_passive_transition(&inst, Status::Running, true).wake);
+        assert!(decide_passive_transition(&inst, Status::Running, true)
+            .wake
+            .is_none());
     }
 
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn flush_passive_transition_wakes_on_disk_and_in_the_live_vec() {
-        let _app_dir = crate::session::test_support::isolate_app_dir();
-        let profile = "flush-wake";
+    fn seed_snoozed(profile: &str) -> Instance {
         let mut inst = Instance::new("watcher", "/tmp/watcher");
         inst.source_profile = profile.to_string();
         inst.snooze(60);
-        let id = inst.id.clone();
         crate::session::Storage::new_unwatched(profile)
             .unwrap()
             .update(|insts, _| {
@@ -451,28 +496,142 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let mut instances = vec![inst];
+        inst
+    }
+
+    fn wake_bundle(
+        profile: &str,
+        id: &str,
+        observed: chrono::DateTime<chrono::Utc>,
+    ) -> std::collections::HashMap<String, PassiveTransitionWrites> {
         let mut bundles: std::collections::HashMap<String, PassiveTransitionWrites> =
             std::collections::HashMap::new();
         bundles
             .entry(profile.to_string())
             .or_default()
-            .wake_ids
-            .push(id.clone());
+            .wakes
+            .insert(id.to_string(), observed);
+        bundles
+    }
 
-        flush_passive_transition_writes(
+    fn disk_snooze(profile: &str, id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        crate::session::Storage::new_unwatched(profile)
+            .unwrap()
+            .load()
+            .unwrap()
+            .into_iter()
+            .find(|i| i.id == id)
+            .unwrap()
+            .snoozed_until
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn flush_passive_transition_wakes_on_disk_and_in_the_live_vec() {
+        let _app_dir = crate::session::test_support::isolate_app_dir();
+        let profile = "flush-wake";
+        let inst = seed_snoozed(profile);
+        let (id, observed) = (inst.id.clone(), inst.snoozed_until.unwrap());
+        let mut instances = vec![inst];
+
+        let failed = flush_passive_transition_writes(
+            crate::file_watch::FileWatchService::noop(),
+            &mut instances,
+            wake_bundle(profile, &id, observed),
+        )
+        .await;
+
+        assert!(failed.is_empty());
+        assert!(!instances[0].is_snoozed());
+        assert_eq!(disk_snooze(profile, &id), None);
+    }
+
+    /// A snooze committed after the wake observed its predecessor survives the wake.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn flush_passive_transition_keeps_a_newer_snooze() {
+        let _app_dir = crate::session::test_support::isolate_app_dir();
+        let profile = "flush-wake-stale";
+        let inst = seed_snoozed(profile);
+        let (id, observed) = (inst.id.clone(), inst.snoozed_until.unwrap());
+        let newer = observed + chrono::Duration::minutes(30);
+        crate::session::Storage::new_unwatched(profile)
+            .unwrap()
+            .update(|insts, _| {
+                insts[0].snoozed_until = Some(newer);
+                Ok(())
+            })
+            .unwrap();
+        let mut instances = vec![inst];
+
+        let failed = flush_passive_transition_writes(
+            crate::file_watch::FileWatchService::noop(),
+            &mut instances,
+            wake_bundle(profile, &id, observed),
+        )
+        .await;
+
+        assert!(failed.is_empty());
+        assert_eq!(disk_snooze(profile, &id), Some(newer));
+        assert!(
+            instances[0].is_snoozed(),
+            "only an accepted wake is mirrored"
+        );
+    }
+
+    /// A wake whose write fails is handed back and lands on the next tick, with no second
+    /// edge into Waiting; one whose snooze has changed meanwhile is dropped.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_failed_wake_is_retried_on_the_next_tick() {
+        let _app_dir = crate::session::test_support::isolate_app_dir();
+        let profile = "flush-wake-retry";
+        let mut inst = Instance::new("watcher", "/tmp/watcher");
+        inst.source_profile = profile.to_string();
+        inst.snooze(60);
+        inst.status = Status::Waiting;
+        let (id, observed) = (inst.id.clone(), inst.snoozed_until.unwrap());
+        let sessions = crate::session::get_profile_dir(profile)
+            .unwrap()
+            .join("sessions.json");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let mut instances = vec![inst.clone()];
+
+        let pending = flush_passive_transition_writes(
+            crate::file_watch::FileWatchService::noop(),
+            &mut instances,
+            wake_bundle(profile, &id, observed),
+        )
+        .await;
+        assert_eq!(pending.get(&id), Some(&observed));
+        assert!(instances[0].is_snoozed());
+
+        std::fs::remove_dir(&sessions).unwrap();
+        crate::session::Storage::new_unwatched(profile)
+            .unwrap()
+            .update(|insts, _| {
+                insts.push(inst.clone());
+                Ok(())
+            })
+            .unwrap();
+        let mut resnoozed = instances.clone();
+        resnoozed[0].snoozed_until = Some(observed + chrono::Duration::minutes(30));
+        let mut superseded = std::collections::HashMap::new();
+        requeue_pending_wakes(pending.clone(), &resnoozed, &mut superseded);
+        assert!(superseded.is_empty(), "a changed snooze drops the wake");
+
+        let mut bundles = std::collections::HashMap::new();
+        requeue_pending_wakes(pending, &instances, &mut bundles);
+        let pending = flush_passive_transition_writes(
             crate::file_watch::FileWatchService::noop(),
             &mut instances,
             bundles,
         )
         .await;
 
+        assert!(pending.is_empty());
         assert!(!instances[0].is_snoozed());
-        let disk = crate::session::Storage::new_unwatched(profile)
-            .unwrap()
-            .load()
-            .unwrap();
-        assert!(!disk.iter().find(|i| i.id == id).unwrap().is_snoozed());
+        assert_eq!(disk_snooze(profile, &id), None);
     }
 
     // #2755 (follow-up to #2729).

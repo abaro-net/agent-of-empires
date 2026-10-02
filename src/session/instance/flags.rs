@@ -251,10 +251,22 @@ impl Instance {
         self.status == Status::Stopped || self.is_snoozed()
     }
 
-    /// Whether arriving at the current status from `old` wakes this snoozed session: it has
+    /// The snooze that arriving at the current status from `old` wakes: the session has
     /// started waiting on the user.
-    pub fn wakes_from_snooze(&self, old: Status) -> bool {
-        self.is_snoozed() && self.status == Status::Waiting && old != Status::Waiting
+    pub fn wakes_from_snooze(&self, old: Status) -> Option<DateTime<Utc>> {
+        (self.is_snoozed() && self.status == Status::Waiting && old != Status::Waiting)
+            .then_some(self.snoozed_until)
+            .flatten()
+    }
+
+    /// Clear the snooze only if it is still the one a wake observed, so a snooze set since
+    /// then survives. Returns whether it cleared.
+    pub fn wake_from_snooze(&mut self, observed: DateTime<Utc>) -> bool {
+        let still_observed = self.snoozed_until == Some(observed);
+        if still_observed {
+            self.snoozed_until = None;
+        }
+        still_observed
     }
 
     /// Combined "don't bother me" sink-state check: trashed, snoozed, or archived.
@@ -327,11 +339,33 @@ mod tests {
             (Status::Idle, Status::Running, false),
         ] {
             inst.status = new;
-            assert_eq!(inst.wakes_from_snooze(old), wakes, "{old:?} -> {new:?}");
+            assert_eq!(
+                inst.wakes_from_snooze(old),
+                wakes.then_some(inst.snoozed_until).flatten(),
+                "{old:?} -> {new:?}"
+            );
         }
         inst.unsnooze();
         inst.status = Status::Waiting;
-        assert!(!inst.wakes_from_snooze(Status::Running), "nothing to wake");
+        assert_eq!(
+            inst.wakes_from_snooze(Status::Running),
+            None,
+            "nothing to wake"
+        );
+    }
+
+    /// A wake clears only the snooze it observed; a snooze set since then survives it.
+    #[test]
+    fn a_wake_leaves_a_newer_snooze_alone() {
+        let mut inst = Instance::new("watcher", "/tmp/watcher");
+        inst.snooze(60);
+        let observed = inst.snoozed_until.unwrap();
+        inst.snoozed_until = Some(observed + chrono::Duration::minutes(5));
+        assert!(!inst.wake_from_snooze(observed));
+        assert!(inst.is_snoozed());
+        inst.snoozed_until = Some(observed);
+        assert!(inst.wake_from_snooze(observed));
+        assert!(!inst.is_snoozed());
     }
 
     #[test]

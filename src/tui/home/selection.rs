@@ -49,6 +49,7 @@ impl HomeView {
         if let Some(header) = hidden_header {
             self.cursor = header;
             self.update_selected();
+            self.context_menu = None;
             return;
         }
         match restored {
