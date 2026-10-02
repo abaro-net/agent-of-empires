@@ -50,6 +50,7 @@ impl HomeView {
             self.cursor = header;
             self.update_selected();
             self.context_menu = None;
+            self.end_live_send_if_hidden();
             return;
         }
         match restored {
@@ -59,6 +60,7 @@ impl HomeView {
             }
             None => {}
         }
+        self.end_live_send_if_hidden();
     }
 
     pub fn sort_order(&self) -> SortOrder {

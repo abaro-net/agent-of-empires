@@ -480,3 +480,37 @@ fn a_session_menu_closes_when_its_session_is_hidden() {
     assert_eq!(env.view.selected_group.as_deref(), Some("util"));
     assert!(env.view.context_menu.is_none());
 }
+
+/// Live-send on a session's terminal ends when the session is stopped elsewhere and hiding takes
+/// its row away: the terminal can outlive the agent, and keys must not reach a pane no longer
+/// shown.
+#[test]
+#[serial]
+fn live_send_ends_when_its_session_is_hidden() {
+    let mut env = env_with_stopped(true);
+    press_y(&mut env);
+    let id = select_session(&mut env, "util-live");
+    let title = env.view.get_instance(&id).unwrap().title.clone();
+    let mut state = live_send_state(
+        &id,
+        &title,
+        &crate::tmux::TerminalSession::resolve_name(&id, &title),
+    );
+    state.target = crate::tui::home::live_send::LiveSendTarget::Terminal;
+    env.view.live_send = Some(state);
+
+    Storage::new_unwatched("test")
+        .unwrap()
+        .update(|insts, _| {
+            let disk = insts.iter_mut().find(|i| i.id == id).unwrap();
+            disk.lifecycle_generation += 1;
+            disk.status = Status::Stopped;
+            Ok(())
+        })
+        .unwrap();
+    env.view.reload_storage_only().unwrap();
+
+    assert!(!session_titles(&env.view).contains(&"util-live".to_string()));
+    assert!(env.view.live_send.is_none(), "live-send ends with its row");
+    assert_eq!(env.view.selected_group.as_deref(), Some("util"));
+}

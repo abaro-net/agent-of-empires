@@ -193,6 +193,13 @@ impl HomeView {
         }
     }
 
+    /// Whether the `y` filter is keeping `inst` out of the list.
+    pub(super) fn hidden_by_filter(&self, inst: &Instance) -> bool {
+        self.hide_stopped_in_groups
+            && inst.status == crate::session::Status::Stopped
+            && self.could_hide(inst)
+    }
+
     /// Whether hiding could take `inst` out of the list once it is stopped.
     fn could_hide(&self, inst: &Instance) -> bool {
         let grouped = match self.group_by {

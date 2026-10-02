@@ -6027,6 +6027,22 @@ impl HomeView {
         }
     }
 
+    /// End live-send when the `y` filter has just taken its target's row away: a stopped
+    /// session's terminal can outlive its agent, and keys must not reach a pane the list no
+    /// longer shows.
+    pub(super) fn end_live_send_if_hidden(&mut self) {
+        let Some(state) = self.live_send.clone() else {
+            return;
+        };
+        if self
+            .get_instance(&state.session_id)
+            .is_some_and(|inst| self.hidden_by_filter(inst))
+        {
+            self.exit_live_send_and_restore_sizing(&state);
+            self.flash_status("Live send ended: its session stopped and is hidden (y to show)");
+        }
+    }
+
     /// Tear down live-send state and restore the tmux window's automatic sizing:
     /// live-send's resize loop forces manual sizing, which would leave the next attach
     /// from a full-size terminal cramped at the preview dimensions. Re-setting
