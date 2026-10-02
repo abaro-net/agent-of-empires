@@ -132,3 +132,42 @@ fn test_new_session_enters_live_mode_when_configured() {
     h.wait_for_timeout("LIVE", Duration::from_secs(10));
     h.assert_screen_contains(" aoe ");
 }
+
+/// `N` opens the form from the row under the cursor: a group row gives its group, a session
+/// row its group and its agent too.
+#[test]
+#[parallel]
+fn test_new_from_selection_starts_on_the_selected_sessions_agent() {
+    require_tmux!();
+    let mut h = TuiTestHarness::new("new_from_selection_agent");
+    h.install_path_command("codex");
+    let project = h.project_path();
+    h.add_session(&[
+        project.to_str().unwrap(),
+        "-t",
+        "codex-source",
+        "--tool",
+        "codex",
+        "-g",
+        "work",
+    ]);
+    h.spawn_tui();
+    h.wait_for("codex-source");
+
+    for (rows_down, tool) in [(0, "claude"), (1, "codex")] {
+        for _ in 0..rows_down {
+            h.send_keys("j");
+        }
+        h.send_keys("N");
+        h.wait_for(" New Session ");
+        let screen = h.capture_screen();
+        for expected in [format!("Tool: ● {tool}"), "Group: work".to_string()] {
+            assert!(
+                screen.contains(&expected),
+                "N {rows_down} rows down should show {expected:?}\nscreen:\n{screen}"
+            );
+        }
+        h.send_keys("Escape");
+        h.wait_for_absent(" New Session ", Duration::from_secs(5));
+    }
+}
