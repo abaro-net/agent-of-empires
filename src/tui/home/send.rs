@@ -28,7 +28,7 @@ impl HomeView {
                 if (old == crate::session::Status::Stopped)
                     != (status == crate::session::Status::Stopped)
                 {
-                    self.rows_after_inactive_change(id);
+                    self.rows_after_stopped_change(id);
                 }
             }
         }

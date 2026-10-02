@@ -246,29 +246,6 @@ impl Instance {
         self.snoozed_until.map(|t| t > Utc::now()).unwrap_or(false)
     }
 
-    /// Stopped or snoozed: a session that can sit out of its group's list until it is needed.
-    pub fn is_inactive(&self) -> bool {
-        self.status == Status::Stopped || self.is_snoozed()
-    }
-
-    /// The snooze that arriving at the current status from `old` wakes: the session has
-    /// started waiting on the user.
-    pub fn wakes_from_snooze(&self, old: Status) -> Option<DateTime<Utc>> {
-        (self.is_snoozed() && self.status == Status::Waiting && old != Status::Waiting)
-            .then_some(self.snoozed_until)
-            .flatten()
-    }
-
-    /// Clear the snooze only if it is still the one a wake observed, so a snooze set since
-    /// then survives. Returns whether it cleared.
-    pub fn wake_from_snooze(&mut self, observed: DateTime<Utc>) -> bool {
-        let still_observed = self.snoozed_until == Some(observed);
-        if still_observed {
-            self.snoozed_until = None;
-        }
-        still_observed
-    }
-
     /// Combined "don't bother me" sink-state check: trashed, snoozed, or archived.
     pub fn is_dismissed(&self) -> bool {
         self.is_trashed() || self.is_snoozed() || self.is_archived()
@@ -324,61 +301,6 @@ impl Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A snoozed session wakes on the edge into Waiting, and only then: it has started waiting on
-    /// the user. A turn ending does not wake it, so a timer-driven session stays put.
-    #[test]
-    fn a_snoozed_session_wakes_only_when_it_starts_waiting() {
-        let mut inst = Instance::new("watcher", "/tmp/watcher");
-        inst.snooze(60);
-        for (old, new, wakes) in [
-            (Status::Running, Status::Waiting, true),
-            (Status::Idle, Status::Waiting, true),
-            (Status::Waiting, Status::Waiting, false),
-            (Status::Running, Status::Idle, false),
-            (Status::Idle, Status::Running, false),
-        ] {
-            inst.status = new;
-            assert_eq!(
-                inst.wakes_from_snooze(old),
-                wakes.then_some(inst.snoozed_until).flatten(),
-                "{old:?} -> {new:?}"
-            );
-        }
-        inst.unsnooze();
-        inst.status = Status::Waiting;
-        assert_eq!(
-            inst.wakes_from_snooze(Status::Running),
-            None,
-            "nothing to wake"
-        );
-    }
-
-    /// A wake clears only the snooze it observed; a snooze set since then survives it.
-    #[test]
-    fn a_wake_leaves_a_newer_snooze_alone() {
-        let mut inst = Instance::new("watcher", "/tmp/watcher");
-        inst.snooze(60);
-        let observed = inst.snoozed_until.unwrap();
-        inst.snoozed_until = Some(observed + chrono::Duration::minutes(5));
-        assert!(!inst.wake_from_snooze(observed));
-        assert!(inst.is_snoozed());
-        inst.snoozed_until = Some(observed);
-        assert!(inst.wake_from_snooze(observed));
-        assert!(!inst.is_snoozed());
-    }
-
-    #[test]
-    fn stopped_and_snoozed_sessions_are_inactive() {
-        let mut inst = Instance::new("s", "/tmp/s");
-        inst.status = Status::Idle;
-        assert!(!inst.is_inactive());
-        inst.status = Status::Stopped;
-        assert!(inst.is_inactive());
-        inst.status = Status::Idle;
-        inst.snooze(60);
-        assert!(inst.is_inactive());
-    }
 
     fn inst() -> Instance {
         Instance::new("test", "/tmp/test")

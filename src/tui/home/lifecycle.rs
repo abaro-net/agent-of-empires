@@ -344,7 +344,6 @@ impl HomeView {
             available_tools,
             status_poller: StatusPoller::new(),
             pending_status_refresh: false,
-            pending_wakes: HashMap::new(),
             show_diagnostics: resolved.session.show_diagnostics_pane,
             metrics_poller: crate::tui::metrics_poller::MetricsPoller::new(),
             pending_metrics_refresh: false,
@@ -445,7 +444,7 @@ impl HomeView {
                 .and_then(|c| c.app_state.archived_section_collapsed)
                 .unwrap_or(true),
             trashed_section_collapsed: true,
-            hide_inactive_in_groups: false,
+            hide_stopped_in_groups: false,
             group_totals: HashMap::new(),
             recovery_rx: None,
             recovery_lock: None,

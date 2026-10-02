@@ -252,9 +252,6 @@ pub struct HomeView {
 
     pub(super) status_poller: StatusPoller,
     pub(super) pending_status_refresh: bool,
-    /// Snoozed sessions that started waiting on the user, with the snooze each wake observed,
-    /// until the wake is on disk or the snooze changes.
-    pub(super) pending_wakes: HashMap<String, chrono::DateTime<chrono::Utc>>,
 
     pub(super) show_diagnostics: bool,
     pub(super) metrics_poller: super::metrics_poller::MetricsPoller,
@@ -383,10 +380,9 @@ pub struct HomeView {
 
     pub(super) archived_section_collapsed: bool,
 
-    /// Inactive (stopped or snoozed) sessions inside groups are left out of the sidebar, for this
-    /// run only.
-    pub(super) hide_inactive_in_groups: bool,
-    /// While inactive sessions are hidden, each group header's full count, keyed by path and
+    /// Stopped sessions inside groups are left out of the sidebar, for this run only.
+    pub(super) hide_stopped_in_groups: bool,
+    /// While stopped sessions are hidden, each group header's full count, keyed by path and
     /// profile, so the header can show `visible/total`.
     pub(super) group_totals: HashMap<(String, Option<String>), usize>,
 

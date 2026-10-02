@@ -2580,10 +2580,6 @@ impl HomeView {
             sort_order: self.sort_order,
             has_search: !self.search_matches.is_empty(),
             project_group_selected: self.project_group_at_cursor().is_some(),
-            session_selected: matches!(
-                self.flat_items.get(self.cursor),
-                Some(Item::Session { .. })
-            ),
         };
         match bindings::resolve_action(&key, self.strict_hotkeys, &ctx) {
             Some(bindings::ResolvedAction::Core(id)) => return self.run_action(id, update_info),
@@ -2837,7 +2833,7 @@ impl HomeView {
             }
             ActionId::ToggleContainer => self.toggle_container_for_selected(),
             ActionId::TogglePreviewInfo => self.toggle_preview_info(),
-            ActionId::ToggleHideInactive => self.toggle_hide_inactive_in_groups(),
+            ActionId::ToggleHideStopped => self.toggle_hide_stopped_in_groups(),
             ActionId::ToggleDiagnostics => self.toggle_diagnostics(),
             ActionId::OpenSystemHealth => self.open_system_health(),
             ActionId::SortPicker => self.show_sort_picker(),
@@ -4651,8 +4647,12 @@ impl HomeView {
                         .unwrap_or((false, false, false)),
                     super::Item::Group { .. } => (false, false, false),
                 };
-                // A session row can be snoozed in every sort, as the `'h'` key can.
-                let snooze = Some(is_snoozed);
+                // Snooze is an Attention-sort triage primitive: the `'h'`
+                // keybinding only fires in Attention sort, so the menu omits
+                // the Snooze row everywhere else to keep the mouse and keyboard
+                // paths in step.
+                let snooze = (self.sort_order == crate::session::config::SortOrder::Attention)
+                    .then_some(is_snoozed);
                 // The unread toggle is always-on (any sort), so it shows
                 // whenever the feature is enabled.
                 let unread = crate::session::unread_enabled().then_some(is_unread);

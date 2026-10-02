@@ -1073,10 +1073,11 @@ fn test_strict_mode_h_collapses_group() {
 
 #[test]
 #[serial]
-fn test_non_strict_h_snoozes_a_session_and_collapses_a_header_outside_attention() {
-    // In Attention sort `h` toggles snooze on the cursor's session and the group below stays
-    // expanded. In every other sort, `h` on a group header falls through to the
-    // `Left | Char('h')` collapse; only a session row snoozes there.
+fn test_non_strict_h_snoozes_only_in_attention_sort() {
+    // Snooze is Attention-only: there `h` toggles snooze on the cursor's session and the
+    // group below stays expanded, while every other sort falls through to the unconditional
+    // `Left | Char('h')` collapse. Before the gate, snooze caught first in non-strict mode
+    // regardless of sort and silently mutated persisted state.
     use crate::session::config::SortOrder;
 
     let mut env = create_test_env_with_groups();

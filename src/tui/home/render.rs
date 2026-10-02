@@ -1582,7 +1582,7 @@ impl HomeView {
                 } else {
                     None
                 };
-                // While inactive sessions are hidden, a header that lost some reads `shown/total`.
+                // While stopped sessions are hidden, a header that lost some reads `shown/total`.
                 let total = (!self.group_totals.is_empty())
                     .then(|| self.group_totals.get(&(path.clone(), profile.clone())))
                     .flatten();

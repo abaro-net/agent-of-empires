@@ -61,7 +61,7 @@ pub enum ActionId {
     ToggleUnread,
     ToggleContainer,
     TogglePreviewInfo,
-    ToggleHideInactive,
+    ToggleHideStopped,
     /// Toggle the system diagnostics strip (CPU and memory pressure plus agent and
     /// process counts). Persisted via `session.show_diagnostics_pane`.
     ToggleDiagnostics,
@@ -144,6 +144,7 @@ const fn alt_code(code: KeyCode) -> Chord {
 pub enum Context {
     Always,
     TerminalView,
+    AttentionSort,
     /// Favorites are actionable when the Attention sort is active (favorite is a
     /// within-tier tiebreak) or `session.favorites_first` is on (it pins in every sort).
     /// With neither, toggling would have no visible effect, so the key stays inert.
@@ -158,9 +159,6 @@ pub enum Context {
     /// Rows can be arranged by hand. Under a computed sort the action still resolves, so
     /// the keys are not silently swallowed by cursor movement: it explains itself instead.
     CustomSortable,
-    /// A session can be snoozed: the Attention sort, or the cursor on a session row in any
-    /// other sort. On a group header the key stays free, so `h` still collapses the group.
-    Snoozable,
 }
 
 /// Help-overlay section. Ordering mirrors `components/help.rs`.
@@ -200,8 +198,6 @@ pub struct Ctx {
     /// True when the cursor sits on a real project header in project view, so
     /// the pin toggle can claim its chord ahead of the projects-dialog binding.
     pub project_group_selected: bool,
-    /// True when the cursor sits on a session row rather than a group header.
-    pub session_selected: bool,
 }
 
 fn chord_matches(c: &Chord, key: &KeyEvent) -> bool {
@@ -217,6 +213,7 @@ fn context_holds(context: Context, ctx: &Ctx) -> bool {
     match context {
         Context::Always => true,
         Context::TerminalView => ctx.view_mode == ViewMode::Terminal,
+        Context::AttentionSort => ctx.sort_order == SortOrder::Attention,
         Context::FavoritesUsable => {
             ctx.sort_order == SortOrder::Attention || crate::session::favorites_first()
         }
@@ -224,7 +221,6 @@ fn context_holds(context: Context, ctx: &Ctx) -> bool {
         Context::ProjectGroupSelected => ctx.project_group_selected,
         Context::UnreadEnabled => crate::session::unread_enabled(),
         Context::CustomSortable => true,
-        Context::Snoozable => ctx.sort_order == SortOrder::Attention || ctx.session_selected,
     }
 }
 
@@ -497,10 +493,10 @@ pub static BINDINGS: &[Binding] = &[
         id: ActionId::ToggleSnooze,
         non_strict: &[k('h')],
         strict: &[k('H')],
-        context: Context::Snoozable,
+        context: Context::AttentionSort,
         help: Some(HelpMeta {
             section: HelpSection::Attention,
-            desc: "Snooze (toggle)",
+            desc: "Snooze (toggle, Attention sort)",
         }),
         palette: Some(PaletteMeta {
             title: "Toggle snooze",
@@ -944,19 +940,17 @@ pub static BINDINGS: &[Binding] = &[
         }),
     },
     Binding {
-        id: ActionId::ToggleHideInactive,
+        id: ActionId::ToggleHideStopped,
         non_strict: &[k('y')],
         strict: &[k('Y')],
         context: Context::Always,
         help: Some(HelpMeta {
             section: HelpSection::Views,
-            desc: "Hide stopped/snoozed in groups (toggle)",
+            desc: "Hide stopped sessions in groups (toggle)",
         }),
         palette: Some(PaletteMeta {
-            title: "Hide stopped and snoozed sessions in groups",
-            keywords: &[
-                "hide", "show", "stopped", "snoozed", "inactive", "grey", "compact", "filter",
-            ],
+            title: "Hide stopped sessions in groups",
+            keywords: &["hide", "show", "stopped", "grey", "compact", "filter"],
             group: PaletteGroup::Views,
         }),
     },
@@ -1115,7 +1109,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::ToggleSnooze => "snooze",
         ActionId::ToggleUnread => "toggle-unread",
         ActionId::TogglePreviewInfo => "toggle-preview-info",
-        ActionId::ToggleHideInactive => "toggle-hide-inactive",
+        ActionId::ToggleHideStopped => "toggle-hide-stopped",
         ActionId::ToggleDiagnostics => "toggle-diagnostics",
         ActionId::OpenSystemHealth => "open-system-health",
         ActionId::SortPicker => "pick-sort",
@@ -1147,7 +1141,6 @@ mod tests {
             sort_order: SortOrder::Newest,
             has_search: false,
             project_group_selected: false,
-            session_selected: false,
         }
     }
 
@@ -1243,7 +1236,7 @@ mod tests {
             // `u` is Update regardless of whether an update is available.
             (key('u'), ActionId::Update),
             (key('U'), ActionId::ToggleUnread),
-            (key('y'), ActionId::ToggleHideInactive),
+            (key('y'), ActionId::ToggleHideStopped),
             (ctrl_key('o'), ActionId::SortPicker),
         ];
         let strict = [
@@ -1254,7 +1247,7 @@ mod tests {
             (key('P'), ActionId::Projects),
             (key('O'), ActionId::SortPicker),
             (key('U'), ActionId::ToggleUnread),
-            (key('Y'), ActionId::ToggleHideInactive),
+            (key('Y'), ActionId::ToggleHideStopped),
             (ctrl_key('d'), ActionId::Diff),
             (ctrl_key('r'), ActionId::Serve),
             (ctrl_key('t'), ActionId::AttachTerminal),
@@ -1272,34 +1265,6 @@ mod tests {
                     "strict={strict_mode} {event:?}"
                 );
             }
-        }
-    }
-
-    /// Snooze keeps its keys and works on a session row in any sort; on a group header outside
-    /// Attention sort the key is left alone, so `h` still collapses the group.
-    #[test]
-    fn snooze_resolves_on_a_session_row_in_every_sort() {
-        let mut c = ctx();
-        for (strict, ch) in [(false, 'h'), (true, 'H')] {
-            c.sort_order = SortOrder::Newest;
-            c.session_selected = true;
-            assert_eq!(
-                resolve(&key(ch), strict, &c),
-                Some(ActionId::ToggleSnooze),
-                "strict={strict}: session row, Newest sort"
-            );
-            c.session_selected = false;
-            assert_eq!(
-                resolve(&key(ch), strict, &c),
-                None,
-                "strict={strict}: group header, Newest sort"
-            );
-            c.sort_order = SortOrder::Attention;
-            assert_eq!(
-                resolve(&key(ch), strict, &c),
-                Some(ActionId::ToggleSnooze),
-                "strict={strict}: Attention sort"
-            );
         }
     }
 
@@ -1349,9 +1314,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn context_guards_gate_attention_and_terminal_actions() {
-        // With the cursor on a group header (`ctx()`), snooze resolves only in the Attention
-        // sort. Favorite resolves there regardless of `session.favorites_first`, which only
-        // opens it outside Attention.
+        // Snooze resolves only in the Attention sort. Favorite resolves there regardless
+        // of `session.favorites_first`, which only opens it outside Attention.
         let original = crate::session::favorites_first();
         crate::session::set_favorites_first(false);
 
