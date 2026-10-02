@@ -1425,6 +1425,7 @@ fn a_selected_session_carries_its_view() {
 
     for (default_structured, source_view) in [(true, View::Terminal), (false, View::Structured)] {
         let mut dialog = multi_tool_dialog();
+        dialog.reload_tool_config();
         dialog.structured_default = default_structured;
         let mut source = source_session("claude", false, false);
         source.view = source_view;

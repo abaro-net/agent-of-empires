@@ -158,12 +158,21 @@ fn test_new_from_selection_starts_on_the_selected_sessions_agent() {
         h.send_keys("N");
         h.wait_for(" New Session ");
         let screen = h.capture_screen();
-        for expected in [format!("Tool: ● {tool}"), "Group: work".to_string()] {
-            assert!(
-                screen.contains(&expected),
-                "N on the {row} row should show {expected:?}\nscreen:\n{screen}"
-            );
-        }
+        let tool_row = screen.lines().find_map(|line| {
+            let rest = &line[line.find("Tool: [")? + "Tool: [".len()..];
+            let (digit, rest) = rest.split_once("] ")?;
+            digit.parse::<u8>().ok()?;
+            Some(rest.split_whitespace().next()?.to_string())
+        });
+        assert_eq!(
+            tool_row.as_deref(),
+            Some(tool),
+            "N on the {row} row should show {tool} on the numbered tool row\nscreen:\n{screen}"
+        );
+        assert!(
+            screen.contains("Group: work"),
+            "N on the {row} row should show the work group\nscreen:\n{screen}"
+        );
         h.send_keys("Escape");
         h.wait_for_absent(" New Session ", Duration::from_secs(5));
     };
