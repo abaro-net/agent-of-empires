@@ -1444,6 +1444,43 @@ fn a_selected_session_carries_its_view() {
     }
 }
 
+/// The carried agent's structured capability comes from the repo config at the form's path,
+/// as it does for the agent the form opened on, so a repo's `agent_detect_as` still counts.
+#[test]
+#[serial_test::serial]
+fn a_carried_agent_is_judged_by_the_repo_config() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _home = crate::session::test_support::isolate_home(temp_home.path());
+    let app_dir = crate::session::get_app_dir().expect("app dir");
+    fs::create_dir_all(app_dir.join("profiles").join("default")).expect("default profile");
+    fs::write(
+        app_dir.join("config.toml"),
+        "[acp]\noffer_structured_in_new_session = true\n",
+    )
+    .expect("global config");
+    let repo = tempfile::tempdir().expect("repo");
+    fs::create_dir_all(repo.path().join(".agent-of-empires")).expect("repo config dir");
+    fs::write(
+        repo.path().join(".agent-of-empires").join("config.toml"),
+        "[session]\nagent_detect_as = { my-agent = \"claude\" }\n",
+    )
+    .expect("repo config");
+
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["claude", "my-agent"], TEST_PATH.to_string());
+    dialog.set_path(repo.path().to_string_lossy().to_string());
+    let mut source = source_session("my-agent", false, false);
+    source.view = View::Structured;
+    dialog.inherit_session(&source);
+
+    assert_eq!(dialog.selected_tool(), "my-agent");
+    assert!(
+        dialog.structured_capable,
+        "the repo maps my-agent onto claude"
+    );
+    assert!(dialog.structured_enabled);
+}
+
 /// A session whose agent is not offered here leaves the form on its defaults: its modes
 /// belong to that agent.
 #[test]

@@ -1950,7 +1950,7 @@ impl NewSessionDialog {
 
     fn reload_tool_config(&mut self) {
         let profile = self.selected_profile().to_string();
-        let config = resolve_config_or_warn(&profile);
+        let config = self.resolve_config_for_path(&profile);
         let tool = self
             .available_tools
             .get(self.tool_index)
