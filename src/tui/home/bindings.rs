@@ -1350,8 +1350,8 @@ mod tests {
     #[serial_test::serial]
     fn context_guards_gate_attention_and_terminal_actions() {
         // With the cursor on a group header (`ctx()`), snooze resolves only in the Attention
-        // sort. Favorite resolves there regardless
-        // of `session.favorites_first`, which only opens it outside Attention.
+        // sort. Favorite resolves there regardless of `session.favorites_first`, which only
+        // opens it outside Attention.
         let original = crate::session::favorites_first();
         crate::session::set_favorites_first(false);
 

@@ -315,8 +315,9 @@ impl HomeView {
     /// Guards: no selection and transient lifecycle (`Creating` / `Deleting`) drop;
     /// archived and trashed rows refuse with an info dialog pointing at the restore key;
     /// pane-dead rows drop silently; snoozed rows drop only under `Attention` sort, where the
-    /// snooze decoration shows; elsewhere the flag is cleared and the restart runs. A repeat within 1.5s is debounced: overlapping cascades would each spawn a
-    /// wake-up worker and tear down the still-booting pane.
+    /// snooze decoration shows; elsewhere the flag is cleared and the restart runs. A repeat
+    /// within 1.5s is debounced: overlapping cascades would each spawn a wake-up worker and
+    /// tear down the still-booting pane.
     ///
     /// `new_profile` moves the session between profile storages and `new_tool` updates
     /// the field before respawn. A swap between two tool names running the same agent on
