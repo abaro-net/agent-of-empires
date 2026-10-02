@@ -703,7 +703,7 @@ fn a_wake_that_failed_to_persist_lands_on_a_later_poll() {
 
     std::fs::remove_dir(&sessions).unwrap();
     std::fs::rename(&parked, &sessions).unwrap();
-    waiting(&mut env, &id);
+    env.view.apply_status_updates_without_hooks(Vec::new());
 
     assert!(session_titles(&env.view).contains(&"util-watcher".to_string()));
     assert_eq!(disk_snooze(&id), None);
@@ -722,6 +722,7 @@ fn a_session_menu_closes_when_its_session_is_hidden() {
     assert!(env
         .view
         .handle_right_click(5, env.view.list_inner_area.y + env.view.cursor as u16));
+    assert_eq!(env.view.selected_session.as_deref(), Some(id.as_str()));
     assert!(env.view.context_menu.is_some());
 
     Storage::new_unwatched("test")
