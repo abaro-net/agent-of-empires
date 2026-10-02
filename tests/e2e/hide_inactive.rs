@@ -11,7 +11,7 @@ use crate::harness::{require_tmux, TuiTestHarness};
 #[parallel]
 fn test_y_hides_a_stopped_session_in_its_group() {
     require_tmux!();
-    let mut h = TuiTestHarness::new("hide_stopped");
+    let mut h = TuiTestHarness::new("hide_inactive");
     let bin = h.install_path_command("claude");
     std::fs::write(bin.join("claude"), "#!/bin/sh\nexec sleep 600\n").expect("write claude stub");
     let project = h.project_path();

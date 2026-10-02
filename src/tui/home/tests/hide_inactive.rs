@@ -535,3 +535,68 @@ fn a_hidden_snoozed_session_that_starts_waiting_comes_back() {
     let disk = Storage::new_unwatched("test").unwrap().load().unwrap();
     assert!(!disk.iter().find(|i| i.id == id).unwrap().is_snoozed());
 }
+
+/// `h` snoozes a session row in a grouped sort; on the group header it still collapses.
+#[test]
+#[serial]
+fn h_snoozes_a_session_row_and_still_collapses_a_group_header() {
+    let mut env = env_with_stopped(true);
+    select_session(&mut env, "util-live");
+    env.view.handle_key(key(KeyCode::Char('h')), None);
+    assert!(
+        env.view.snooze_duration_dialog.is_some(),
+        "h on a session row opens the snooze picker"
+    );
+    env.view.snooze_duration_dialog = None;
+
+    let header = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { path, .. } if path == "util"))
+        .unwrap();
+    env.view.cursor = header;
+    env.view.update_selected();
+    env.view.handle_key(key(KeyCode::Char('h')), None);
+    assert!(env.view.snooze_duration_dialog.is_none());
+    assert!(
+        matches!(
+            &env.view.flat_items[env.view.cursor],
+            Item::Group {
+                collapsed: true,
+                ..
+            }
+        ),
+        "h on a group header collapses it"
+    );
+}
+
+/// Snoozing the selected grouped session while hiding is on hands the selection to its group,
+/// and waking it brings the row back.
+#[test]
+#[serial]
+fn snoozing_the_selected_session_while_hidden_keeps_the_selection_in_its_group() {
+    let mut env = env_with_stopped(true);
+    press_y(&mut env);
+    let id = select_session(&mut env, "util-live");
+
+    env.view.snooze_session_for(&id, 60).unwrap();
+    assert!(!session_titles(&env.view).contains(&"util-live".to_string()));
+    assert_eq!(env.view.selected_group.as_deref(), Some("util"));
+
+    let header = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { path, .. } if path == "util"))
+        .unwrap();
+    env.view.cursor = header;
+    env.view.update_selected();
+    env.view.selected_session = Some(id.clone());
+    env.view.toggle_snooze_at_cursor().unwrap();
+    assert!(session_titles(&env.view).contains(&"util-live".to_string()));
+    assert!(
+        matches!(&env.view.flat_items[env.view.cursor], Item::Session { id: at, .. } if *at == id),
+        "the cursor follows the woken row"
+    );
+}

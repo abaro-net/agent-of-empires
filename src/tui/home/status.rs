@@ -615,7 +615,7 @@ impl HomeView {
                     // One flock for both the status/timestamp patch and the unread mark,
                     // matching the daemon's per-tick batching instead of two `Storage::update`
                     // calls on the same row.
-                    // Structured rows are the daemon's to wake, as their unread mark is.
+                    // Terminal rows only, like the unread mark.
                     let wake = !structured
                         && self
                             .get_instance(&update.id)
