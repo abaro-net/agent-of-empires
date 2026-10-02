@@ -737,3 +737,21 @@ fn a_session_menu_closes_when_its_session_is_hidden() {
     assert_eq!(env.view.selected_group.as_deref(), Some("util"));
     assert!(env.view.context_menu.is_none());
 }
+
+/// A wake on a row whose store is not loaded, as after a failed profile switch, stays pending
+/// rather than clearing the snooze in memory only; it lands once the store is back.
+#[test]
+#[serial]
+fn a_wake_waits_for_its_store() {
+    let (mut env, id) = env_with_snoozed_watcher();
+    let storage = env.view.storages.remove("test").unwrap();
+
+    waiting(&mut env, &id);
+    assert!(!session_titles(&env.view).contains(&"util-watcher".to_string()));
+
+    env.view.storages.insert("test".to_string(), storage);
+    env.view.apply_status_updates_without_hooks(Vec::new());
+
+    assert!(session_titles(&env.view).contains(&"util-watcher".to_string()));
+    assert_eq!(disk_snooze(&id), None);
+}

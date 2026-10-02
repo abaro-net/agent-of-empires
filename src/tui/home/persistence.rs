@@ -480,8 +480,8 @@ impl HomeView {
     }
 
     /// Clear `id`'s snooze on disk if it is still the one the wake observed. `Ok(false)` means
-    /// a newer snooze, or none, was there and is left alone; `Err` means the write failed. A
-    /// row with no store is woken in memory only, as `apply_user_action` does.
+    /// a newer snooze, or none, was there and is left alone; `Err` means the write failed or
+    /// the row's store is not loaded, so the wake stays pending.
     pub(in crate::tui) fn persist_wake(
         &self,
         id: &str,
@@ -492,7 +492,7 @@ impl HomeView {
             .get(id)
             .and_then(|inst| self.storages.get(&inst.source_profile))
         else {
-            return Ok(true);
+            return Err(());
         };
         let mut woke = false;
         storage
