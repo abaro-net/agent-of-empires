@@ -154,20 +154,21 @@ fn test_new_from_selection_starts_on_the_selected_sessions_agent() {
     h.spawn_tui();
     h.wait_for("codex-source");
 
-    for (rows_down, tool) in [(0, "claude"), (1, "codex")] {
-        for _ in 0..rows_down {
-            h.send_keys("j");
-        }
+    let new_from_selection_shows = |row: &str, tool: &str| {
         h.send_keys("N");
         h.wait_for(" New Session ");
         let screen = h.capture_screen();
         for expected in [format!("Tool: ● {tool}"), "Group: work".to_string()] {
             assert!(
                 screen.contains(&expected),
-                "N {rows_down} rows down should show {expected:?}\nscreen:\n{screen}"
+                "N on the {row} row should show {expected:?}\nscreen:\n{screen}"
             );
         }
         h.send_keys("Escape");
         h.wait_for_absent(" New Session ", Duration::from_secs(5));
-    }
+    };
+
+    new_from_selection_shows("group", "claude");
+    h.send_keys("j");
+    new_from_selection_shows("session", "codex");
 }
