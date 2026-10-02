@@ -2833,6 +2833,7 @@ impl HomeView {
             }
             ActionId::ToggleContainer => self.toggle_container_for_selected(),
             ActionId::TogglePreviewInfo => self.toggle_preview_info(),
+            ActionId::ToggleHideStopped => self.toggle_hide_stopped_in_groups(),
             ActionId::ToggleDiagnostics => self.toggle_diagnostics(),
             ActionId::OpenSystemHealth => self.open_system_health(),
             ActionId::SortPicker => self.show_sort_picker(),
@@ -4149,7 +4150,7 @@ impl HomeView {
     pub(super) fn apply_sort_order(&mut self, new_order: SortOrder) {
         self.sort_order = new_order;
         if self.search_active && !self.search_query.value().is_empty() {
-            self.flat_items = self.build_flat_items();
+            self.refresh_flat_items();
             self.update_search();
         } else {
             self.rebuild_flat_items();
@@ -6350,7 +6351,7 @@ impl HomeView {
     /// `search_matches` keeps stale indices, and `n`/`N` jumps to the wrong sessions
     /// (#2676).
     pub(super) fn rebuild_flat_items(&mut self) {
-        self.flat_items = self.build_flat_items();
+        self.refresh_flat_items();
         if !self.search_matches.is_empty() {
             self.refresh_search_matches();
         }
