@@ -458,3 +458,25 @@ fn a_structured_session_lifted_out_of_stopped_reappears() {
     assert!(session_titles(&env.view).contains(&"acp-stopped".to_string()));
     assert!(header_text(&env.view, "util").contains("util (2)"));
 }
+
+/// A session menu closes when its session stops and drops out under it, rather than acting on the
+/// group header the selection falls back to.
+#[test]
+#[serial]
+fn a_session_menu_closes_when_its_session_is_hidden() {
+    let mut env = env_with_stopped(true);
+    press_y(&mut env);
+    let id = select_session(&mut env, "util-live");
+    env.view.list_inner_area = ratatui::layout::Rect::new(1, 1, 28, 20);
+    env.view.list_area = ratatui::layout::Rect::new(0, 0, 30, 22);
+    assert!(env
+        .view
+        .handle_right_click(5, env.view.list_inner_area.y + env.view.cursor as u16));
+    assert_eq!(env.view.selected_session.as_deref(), Some(id.as_str()));
+    assert!(env.view.context_menu.is_some());
+
+    env.view.set_instance_status(&id, Status::Stopped);
+
+    assert_eq!(env.view.selected_group.as_deref(), Some("util"));
+    assert!(env.view.context_menu.is_none());
+}
