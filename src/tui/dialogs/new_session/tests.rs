@@ -1355,3 +1355,27 @@ fn terminal_fork_hides_structured_despite_structured_default() {
     assert!(!dialog.structured_capable);
     assert!(!dialog.structured_enabled);
 }
+
+#[test]
+fn only_a_title_the_user_typed_is_marked_typed() {
+    let mut dialog = single_tool_dialog();
+    assert!(!submitted(dialog.build_submit_result()).title_typed);
+
+    dialog.focused_field = dialog.title_field();
+    type_str(&mut dialog, "night shift");
+    let data = submitted(dialog.build_submit_result());
+    assert_eq!(data.title, "night shift");
+    assert!(data.title_typed);
+
+    let mut fork = single_tool_dialog();
+    fork.set_title("plan (fork)".to_string());
+    assert!(
+        !submitted(fork.build_submit_result()).title_typed,
+        "a suggested title left as it is"
+    );
+    fork.focused_field = fork.title_field();
+    type_str(&mut fork, " b");
+    let data = submitted(fork.build_submit_result());
+    assert_eq!(data.title, "plan (fork) b");
+    assert!(data.title_typed, "an edited suggestion is typed");
+}
