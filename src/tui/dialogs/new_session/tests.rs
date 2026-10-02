@@ -1355,12 +1355,18 @@ fn a_selected_session_carries_its_agent_and_modes() {
     assert!(dialog.sandbox_enabled);
     assert!(!dialog.yolo_mode, "a yolo source does not turn yolo on");
 
+    // An unsandboxed source never switches a profile's sandbox off: with yolo on by
+    // default that would launch an unsandboxed yolo agent on the host.
+    let mut dialog = multi_tool_dialog();
+    dialog.docker_available = true;
+    dialog.sandbox_enabled = true;
     dialog.yolo_mode_default = true;
     dialog.inherit_session(&source_session("opencode", false, false));
-    assert!(!dialog.sandbox_enabled);
+    assert_eq!(dialog.selected_tool(), "opencode");
+    assert!(dialog.sandbox_enabled, "the sandbox default stays on");
     assert!(
         dialog.yolo_mode,
-        "nor does a cautious one turn the default off"
+        "nor does a cautious source turn the yolo default off"
     );
 }
 

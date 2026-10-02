@@ -634,8 +634,8 @@ impl NewSessionDialog {
             self.structured_enabled = structured;
             self.structured_choice = Some(structured);
         }
-        if !sandboxed || (self.docker_available && !self.selected_tool_host_only()) {
-            self.set_sandbox_enabled(sandboxed);
+        if sandboxed && self.docker_available && !self.selected_tool_host_only() {
+            self.set_sandbox_enabled(true);
         }
     }
 
