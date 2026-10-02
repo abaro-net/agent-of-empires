@@ -2833,7 +2833,7 @@ impl HomeView {
             }
             ActionId::ToggleContainer => self.toggle_container_for_selected(),
             ActionId::TogglePreviewInfo => self.toggle_preview_info(),
-            ActionId::ToggleHideStopped => self.toggle_hide_stopped_in_groups(),
+            ActionId::ToggleHideInactive => self.toggle_hide_inactive_in_groups(),
             ActionId::ToggleDiagnostics => self.toggle_diagnostics(),
             ActionId::OpenSystemHealth => self.open_system_health(),
             ActionId::SortPicker => self.show_sort_picker(),

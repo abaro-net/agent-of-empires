@@ -246,6 +246,17 @@ impl Instance {
         self.snoozed_until.map(|t| t > Utc::now()).unwrap_or(false)
     }
 
+    /// Stopped or snoozed: a session that can sit out of its group's list until it is needed.
+    pub fn is_inactive(&self) -> bool {
+        self.status == Status::Stopped || self.is_snoozed()
+    }
+
+    /// Whether arriving at the current status from `old` wakes this snoozed session: it has
+    /// started waiting on the user.
+    pub fn wakes_from_snooze(&self, old: Status) -> bool {
+        self.is_snoozed() && self.status == Status::Waiting && old != Status::Waiting
+    }
+
     /// Combined "don't bother me" sink-state check: trashed, snoozed, or archived.
     pub fn is_dismissed(&self) -> bool {
         self.is_trashed() || self.is_snoozed() || self.is_archived()
@@ -301,6 +312,39 @@ impl Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A snoozed session wakes on the edge into Waiting, and only then: it has started waiting on
+    /// the user. A turn ending does not wake it, so a timer-driven session stays put.
+    #[test]
+    fn a_snoozed_session_wakes_only_when_it_starts_waiting() {
+        let mut inst = Instance::new("watcher", "/tmp/watcher");
+        inst.snooze(60);
+        for (old, new, wakes) in [
+            (Status::Running, Status::Waiting, true),
+            (Status::Idle, Status::Waiting, true),
+            (Status::Waiting, Status::Waiting, false),
+            (Status::Running, Status::Idle, false),
+            (Status::Idle, Status::Running, false),
+        ] {
+            inst.status = new;
+            assert_eq!(inst.wakes_from_snooze(old), wakes, "{old:?} -> {new:?}");
+        }
+        inst.unsnooze();
+        inst.status = Status::Waiting;
+        assert!(!inst.wakes_from_snooze(Status::Running), "nothing to wake");
+    }
+
+    #[test]
+    fn stopped_and_snoozed_sessions_are_inactive() {
+        let mut inst = Instance::new("s", "/tmp/s");
+        inst.status = Status::Idle;
+        assert!(!inst.is_inactive());
+        inst.status = Status::Stopped;
+        assert!(inst.is_inactive());
+        inst.status = Status::Idle;
+        inst.snooze(60);
+        assert!(inst.is_inactive());
+    }
 
     fn inst() -> Instance {
         Instance::new("test", "/tmp/test")

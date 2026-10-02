@@ -61,7 +61,7 @@ pub enum ActionId {
     ToggleUnread,
     ToggleContainer,
     TogglePreviewInfo,
-    ToggleHideStopped,
+    ToggleHideInactive,
     /// Toggle the system diagnostics strip (CPU and memory pressure plus agent and
     /// process counts). Persisted via `session.show_diagnostics_pane`.
     ToggleDiagnostics,
@@ -940,17 +940,19 @@ pub static BINDINGS: &[Binding] = &[
         }),
     },
     Binding {
-        id: ActionId::ToggleHideStopped,
+        id: ActionId::ToggleHideInactive,
         non_strict: &[k('y')],
         strict: &[k('Y')],
         context: Context::Always,
         help: Some(HelpMeta {
             section: HelpSection::Views,
-            desc: "Hide stopped sessions in groups (toggle)",
+            desc: "Hide stopped/snoozed in groups (toggle)",
         }),
         palette: Some(PaletteMeta {
-            title: "Hide stopped sessions in groups",
-            keywords: &["hide", "show", "stopped", "grey", "compact", "filter"],
+            title: "Hide stopped and snoozed sessions in groups",
+            keywords: &[
+                "hide", "show", "stopped", "snoozed", "inactive", "grey", "compact", "filter",
+            ],
             group: PaletteGroup::Views,
         }),
     },
@@ -1109,7 +1111,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::ToggleSnooze => "snooze",
         ActionId::ToggleUnread => "toggle-unread",
         ActionId::TogglePreviewInfo => "toggle-preview-info",
-        ActionId::ToggleHideStopped => "toggle-hide-stopped",
+        ActionId::ToggleHideInactive => "toggle-hide-inactive",
         ActionId::ToggleDiagnostics => "toggle-diagnostics",
         ActionId::OpenSystemHealth => "open-system-health",
         ActionId::SortPicker => "pick-sort",
@@ -1236,7 +1238,7 @@ mod tests {
             // `u` is Update regardless of whether an update is available.
             (key('u'), ActionId::Update),
             (key('U'), ActionId::ToggleUnread),
-            (key('y'), ActionId::ToggleHideStopped),
+            (key('y'), ActionId::ToggleHideInactive),
             (ctrl_key('o'), ActionId::SortPicker),
         ];
         let strict = [
@@ -1247,7 +1249,7 @@ mod tests {
             (key('P'), ActionId::Projects),
             (key('O'), ActionId::SortPicker),
             (key('U'), ActionId::ToggleUnread),
-            (key('Y'), ActionId::ToggleHideStopped),
+            (key('Y'), ActionId::ToggleHideInactive),
             (ctrl_key('d'), ActionId::Diff),
             (ctrl_key('r'), ActionId::Serve),
             (ctrl_key('t'), ActionId::AttachTerminal),

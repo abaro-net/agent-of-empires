@@ -444,7 +444,7 @@ impl HomeView {
                 .and_then(|c| c.app_state.archived_section_collapsed)
                 .unwrap_or(true),
             trashed_section_collapsed: true,
-            hide_stopped_in_groups: false,
+            hide_inactive_in_groups: false,
             group_totals: HashMap::new(),
             recovery_rx: None,
             recovery_lock: None,

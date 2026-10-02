@@ -1690,7 +1690,7 @@ impl HomeView {
         };
         if is_snoozed {
             self.apply_user_action(&id, |inst| inst.unsnooze())?;
-            self.rebuild_flat_items();
+            self.rebuild_flat_items_keeping_cursor();
             return Ok(Some(format!("Woke: {}", title)));
         }
 
@@ -1713,7 +1713,7 @@ impl HomeView {
             .map(|i| i.title.clone())
             .unwrap_or_default();
         self.apply_user_action(id, |inst| inst.snooze(minutes))?;
-        self.rebuild_flat_items();
+        self.rebuild_flat_items_keeping_cursor();
         if self.sort_order == crate::session::config::SortOrder::Attention {
             self.select_top_attention(None);
         }

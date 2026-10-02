@@ -285,7 +285,7 @@ fn custom_moves_wait_until_stopped_sessions_are_shown() {
     assert!(env
         .view
         .status_flash_text()
-        .is_some_and(|t| t.contains("Show stopped sessions")));
+        .is_some_and(|t| t.contains("Show stopped and snoozed sessions")));
     let after: Vec<_> = env
         .view
         .instances
@@ -307,7 +307,7 @@ fn custom_moves_wait_until_stopped_sessions_are_shown() {
     assert!(
         !env.view
             .status_flash_text()
-            .is_some_and(|t| t.contains("Show stopped sessions")),
+            .is_some_and(|t| t.contains("Show stopped and snoozed sessions")),
         "a group header moves among groups, which hiding does not touch"
     );
 
@@ -457,4 +457,81 @@ fn a_structured_session_lifted_out_of_stopped_reappears() {
         });
     assert!(session_titles(&env.view).contains(&"acp-stopped".to_string()));
     assert!(header_text(&env.view, "util").contains("util (2)"));
+}
+
+fn snoozed(mut inst: Instance) -> Instance {
+    inst.snooze(60);
+    inst
+}
+
+/// A snoozed session sits out of its group like a stopped one; one in no group stays shown.
+#[test]
+#[serial]
+fn y_hides_snoozed_sessions_in_groups_too() {
+    let mut env = seeded_env(
+        test_home(),
+        &[
+            with_status(instance_in("util-live", "/tmp/util", "util"), Status::Idle),
+            snoozed(with_status(
+                instance_in("util-snoozed", "/tmp/util", "util"),
+                Status::Idle,
+            )),
+            snoozed(with_status(
+                Instance::new("loose-snoozed", "/tmp/loose"),
+                Status::Idle,
+            )),
+        ],
+        true,
+    );
+    assert!(session_titles(&env.view).contains(&"util-snoozed".to_string()));
+
+    press_y(&mut env);
+    let shown = session_titles(&env.view);
+    assert!(!shown.contains(&"util-snoozed".to_string()), "{shown:?}");
+    assert!(shown.contains(&"loose-snoozed".to_string()), "{shown:?}");
+    assert!(header_text(&env.view, "util").contains("util (1/2)"));
+}
+
+/// A hidden snoozed session that starts waiting on the user wakes and comes back into its
+/// group, and the wake is saved so a reload does not snooze it again.
+#[test]
+#[serial]
+fn a_hidden_snoozed_session_that_starts_waiting_comes_back() {
+    let watcher = snoozed(with_status(
+        instance_in("util-watcher", "/tmp/util", "util"),
+        Status::Running,
+    ));
+    let id = watcher.id.clone();
+    let mut env = seeded_env(
+        test_home(),
+        &[
+            with_status(instance_in("util-live", "/tmp/util", "util"), Status::Idle),
+            watcher,
+        ],
+        true,
+    );
+    press_y(&mut env);
+    assert!(!session_titles(&env.view).contains(&"util-watcher".to_string()));
+
+    env.view
+        .apply_status_updates_without_hooks(vec![status_update(
+            &id,
+            Status::Idle,
+            crate::tui::status_poller::IdleIntent::Keep,
+        )]);
+    assert!(
+        !session_titles(&env.view).contains(&"util-watcher".to_string()),
+        "a finished turn leaves it snoozed"
+    );
+
+    env.view
+        .apply_status_updates_without_hooks(vec![status_update(
+            &id,
+            Status::Waiting,
+            crate::tui::status_poller::IdleIntent::Keep,
+        )]);
+    assert!(session_titles(&env.view).contains(&"util-watcher".to_string()));
+    assert!(header_text(&env.view, "util").contains("util (2)"));
+    let disk = Storage::new_unwatched("test").unwrap().load().unwrap();
+    assert!(!disk.iter().find(|i| i.id == id).unwrap().is_snoozed());
 }

@@ -360,7 +360,7 @@ impl HomeView {
         // worker epoch rather than a trailing post-stop event.
         if update.status != Status::Stopped && was_stopped {
             self.mutate_instance(&update.id, |inst| inst.status = Status::Idle);
-            self.rows_after_stopped_change(&update.id);
+            self.rows_after_inactive_change(&update.id);
         }
         self.apply_status_update(
             StatusUpdate {
@@ -615,9 +615,18 @@ impl HomeView {
                     // One flock for both the status/timestamp patch and the unread mark,
                     // matching the daemon's per-tick batching instead of two `Storage::update`
                     // calls on the same row.
-                    self.persist_passive_status_transition(&update.id, should_mark_unread);
+                    // Structured rows are the daemon's to wake, as their unread mark is.
+                    let wake = !structured
+                        && self
+                            .get_instance(&update.id)
+                            .is_some_and(|i| i.wakes_from_snooze(old));
+                    self.persist_passive_status_transition(&update.id, should_mark_unread, wake);
                     if should_mark_unread {
                         self.mutate_instance(&update.id, |inst| inst.mark_unread());
+                    }
+                    if wake {
+                        self.mutate_instance(&update.id, |inst| inst.unsnooze());
+                        self.rebuild_flat_items_keeping_cursor();
                     }
 
                     if let Some(inst) = self.get_instance(&update.id).cloned() {

@@ -380,9 +380,10 @@ pub struct HomeView {
 
     pub(super) archived_section_collapsed: bool,
 
-    /// Stopped sessions inside groups are left out of the sidebar, for this run only.
-    pub(super) hide_stopped_in_groups: bool,
-    /// While stopped sessions are hidden, each group header's full count, keyed by path and
+    /// Inactive (stopped or snoozed) sessions inside groups are left out of the sidebar, for this
+    /// run only.
+    pub(super) hide_inactive_in_groups: bool,
+    /// While inactive sessions are hidden, each group header's full count, keyed by path and
     /// profile, so the header can show `visible/total`.
     pub(super) group_totals: HashMap<(String, Option<String>), usize>,
 

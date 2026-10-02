@@ -24,6 +24,9 @@ pub(super) struct PassiveTransitionDecision {
     patch: Option<crate::session::PassiveStatusPatch>,
     /// Always `false` for structured / ACP sessions.
     mark_unread: bool,
+    /// A snoozed session that just started waiting on the user. Always `false` for
+    /// structured / ACP sessions.
+    wake: bool,
 }
 
 /// Compute the passive-status write decision for one instance whose `status` differs from
@@ -41,7 +44,12 @@ pub(super) fn decide_passive_transition(
         && old_status == Status::Running
         && inst.status == Status::Idle
         && !inst.unread;
-    PassiveTransitionDecision { patch, mark_unread }
+    let wake = !inst.is_structured() && inst.wakes_from_snooze(old_status);
+    PassiveTransitionDecision {
+        patch,
+        mark_unread,
+        wake,
+    }
 }
 
 /// Per-profile bundle of passive-status writes accumulated in one `status_poll_loop` tick.
@@ -50,6 +58,8 @@ pub(super) struct PassiveTransitionWrites {
     /// Keyed by instance id for O(1) lookup inside the persist closure.
     patches: std::collections::HashMap<String, crate::session::PassiveStatusPatch>,
     unread_ids: Vec<String>,
+    /// Snoozed sessions that just started waiting on the user.
+    wake_ids: Vec<String>,
 }
 
 /// Flush one tick's per-profile passive-status writes.
@@ -63,12 +73,14 @@ pub(super) async fn flush_passive_transition_writes(
         PassiveTransitionWrites {
             patches,
             unread_ids,
+            wake_ids,
         },
     ) in bundles
     {
-        // The closure moves `unread_ids`; keep a copy to mirror into the live
-        // vec once the write is durable.
+        // The closure moves `unread_ids` and `wake_ids`; keep copies to mirror into the
+        // live vec once the write is durable.
         let unread_ids_for_local = unread_ids.clone();
+        let wake_ids_for_local = wake_ids.clone();
         let patch_count = patches.len();
         let unread_count = unread_ids.len();
         let persisted = api::persist_session_update(
@@ -82,6 +94,9 @@ pub(super) async fn flush_passive_transition_writes(
                     }
                     if unread_ids.contains(&inst.id) {
                         inst.mark_unread();
+                    }
+                    if wake_ids.contains(&inst.id) {
+                        inst.unsnooze();
                     }
                 }
             },
@@ -100,6 +115,9 @@ pub(super) async fn flush_passive_transition_writes(
             for inst in instances.iter_mut() {
                 if unread_ids_for_local.contains(&inst.id) {
                     inst.mark_unread();
+                }
+                if wake_ids_for_local.contains(&inst.id) {
+                    inst.unsnooze();
                 }
             }
         }
@@ -233,12 +251,15 @@ pub(super) async fn status_poll_loop(state: Arc<AppState>) {
                     at: now,
                 });
                 let decision = decide_passive_transition(inst, old, unread_enabled);
-                if decision.patch.is_none() && !decision.mark_unread {
+                if decision.patch.is_none() && !decision.mark_unread && !decision.wake {
                     continue;
                 }
                 let bundle = bundles.entry(inst.source_profile.clone()).or_default();
                 if let Some(patch) = decision.patch {
                     bundle.patches.insert(inst.id.clone(), patch);
+                }
+                if decision.wake {
+                    bundle.wake_ids.push(inst.id.clone());
                 }
                 if decision.mark_unread {
                     // Record the id only; the in-memory mark on `instances` is deferred to
@@ -394,6 +415,64 @@ mod tests {
         assert!(!decide_passive_transition(&inst, Status::Waiting, true).mark_unread);
         inst.unread = true;
         assert!(!decide_passive_transition(&inst, Status::Running, true).mark_unread);
+    }
+
+    /// The daemon wakes a snoozed terminal session that starts waiting, so a parked session
+    /// comes back even with no TUI open. Structured rows are left alone, like their unread mark.
+    #[test]
+    fn decide_passive_transition_wakes_a_snoozed_session_that_starts_waiting() {
+        let mut inst = Instance::new("watcher", "/tmp/watcher");
+        inst.snooze(60);
+        inst.status = Status::Waiting;
+        assert!(decide_passive_transition(&inst, Status::Running, true).wake);
+        inst.status = Status::Idle;
+        assert!(
+            !decide_passive_transition(&inst, Status::Running, true).wake,
+            "a finished turn leaves it snoozed"
+        );
+        inst.status = Status::Waiting;
+        inst.view = crate::session::View::Structured;
+        assert!(!decide_passive_transition(&inst, Status::Running, true).wake);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn flush_passive_transition_wakes_on_disk_and_in_the_live_vec() {
+        let _app_dir = crate::session::test_support::isolate_app_dir();
+        let profile = "flush-wake";
+        let mut inst = Instance::new("watcher", "/tmp/watcher");
+        inst.source_profile = profile.to_string();
+        inst.snooze(60);
+        let id = inst.id.clone();
+        crate::session::Storage::new_unwatched(profile)
+            .unwrap()
+            .update(|insts, _| {
+                insts.push(inst.clone());
+                Ok(())
+            })
+            .unwrap();
+        let mut instances = vec![inst];
+        let mut bundles: std::collections::HashMap<String, PassiveTransitionWrites> =
+            std::collections::HashMap::new();
+        bundles
+            .entry(profile.to_string())
+            .or_default()
+            .wake_ids
+            .push(id.clone());
+
+        flush_passive_transition_writes(
+            crate::file_watch::FileWatchService::noop(),
+            &mut instances,
+            bundles,
+        )
+        .await;
+
+        assert!(!instances[0].is_snoozed());
+        let disk = crate::session::Storage::new_unwatched(profile)
+            .unwrap()
+            .load()
+            .unwrap();
+        assert!(!disk.iter().find(|i| i.id == id).unwrap().is_snoozed());
     }
 
     // #2755 (follow-up to #2729).

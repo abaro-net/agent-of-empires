@@ -5,18 +5,15 @@ use std::collections::HashSet;
 
 use super::*;
 
-/// `pool` without the stopped sessions that sit in a group, when `hide_stopped` is on. Archived
-/// and trashed sessions keep their own sections.
-fn shown_in_groups(pool: Vec<Instance>, hide_stopped: bool) -> Vec<Instance> {
-    if !hide_stopped {
+/// `pool` without the inactive (stopped or snoozed) sessions that sit in a group, when
+/// `hide_inactive` is on. Archived and trashed sessions keep their own sections.
+fn shown_in_groups(pool: Vec<Instance>, hide_inactive: bool) -> Vec<Instance> {
+    if !hide_inactive {
         return pool;
     }
     pool.into_iter()
         .filter(|i| {
-            i.status != crate::session::Status::Stopped
-                || i.group_path.is_empty()
-                || i.is_archived()
-                || i.is_trashed()
+            !i.is_inactive() || i.group_path.is_empty() || i.is_archived() || i.is_trashed()
         })
         .collect()
 }
@@ -147,13 +144,13 @@ impl HomeView {
     }
 
     pub(in crate::tui) fn build_flat_items(&self) -> Vec<Item> {
-        self.build_flat_items_hiding(self.hide_stopped_in_groups)
+        self.build_flat_items_hiding(self.hide_inactive_in_groups)
     }
 
-    /// Rebuild the rows and, while stopped sessions are hidden, every group header's full count.
+    /// Rebuild the rows and, while inactive sessions are hidden, every group header's full count.
     pub(super) fn refresh_flat_items(&mut self) {
         self.flat_items = self.build_flat_items();
-        self.group_totals = if self.hide_stopped_in_groups {
+        self.group_totals = if self.hide_inactive_in_groups {
             self.build_flat_items_hiding(false)
                 .into_iter()
                 .filter_map(|item| match item {
@@ -171,29 +168,29 @@ impl HomeView {
         };
     }
 
-    pub(super) fn toggle_hide_stopped_in_groups(&mut self) {
-        self.hide_stopped_in_groups = !self.hide_stopped_in_groups;
+    pub(super) fn toggle_hide_inactive_in_groups(&mut self) {
+        self.hide_inactive_in_groups = !self.hide_inactive_in_groups;
         self.rebuild_flat_items_keeping_cursor();
         self.update_selected();
-        self.flash_status(if self.hide_stopped_in_groups {
-            "Stopped sessions in groups hidden (y to show)"
+        self.flash_status(if self.hide_inactive_in_groups {
+            "Stopped and snoozed sessions in groups hidden (y to show)"
         } else {
-            "Showing stopped sessions"
+            "Showing stopped and snoozed sessions"
         });
     }
 
-    /// Session `id` entered or left Stopped: while those are hidden in groups, its row joins or
-    /// leaves the list now rather than at the next reload.
-    pub(super) fn rows_after_stopped_change(&mut self, id: &str) {
+    /// Session `id` became or stopped being inactive: while those are hidden in groups, its row
+    /// joins or leaves the list now rather than at the next reload.
+    pub(super) fn rows_after_inactive_change(&mut self, id: &str) {
         let hideable = self
             .get_instance(id)
             .is_some_and(|inst| self.could_hide(inst));
-        if self.hide_stopped_in_groups && hideable {
+        if self.hide_inactive_in_groups && hideable {
             self.rebuild_flat_items_keeping_cursor();
         }
     }
 
-    /// Whether hiding could take `inst` out of the list once it is stopped.
+    /// Whether hiding could take `inst` out of the list once it is inactive.
     fn could_hide(&self, inst: &Instance) -> bool {
         let grouped = match self.group_by {
             GroupByMode::Manual => {
@@ -223,9 +220,7 @@ impl HomeView {
         header: &(String, Option<String>),
     ) -> Option<usize> {
         let id = self.selected_session.as_ref()?;
-        if !self.hide_stopped_in_groups
-            || self.get_instance(id)?.status != crate::session::Status::Stopped
-        {
+        if !self.hide_inactive_in_groups || !self.get_instance(id)?.is_inactive() {
             return None;
         }
         self.flat_items.iter().position(|item| {
@@ -234,11 +229,11 @@ impl HomeView {
         })
     }
 
-    fn build_flat_items_hiding(&self, hide_stopped: bool) -> Vec<Item> {
+    fn build_flat_items_hiding(&self, hide_inactive: bool) -> Vec<Item> {
         // Project/org grouping keeps headers under every sort order, Attention included.
         match self.group_by {
-            GroupByMode::Project => return self.build_flat_items_by_project(hide_stopped),
-            GroupByMode::Org => return self.build_flat_items_by_org(hide_stopped),
+            GroupByMode::Project => return self.build_flat_items_by_project(hide_inactive),
+            GroupByMode::Org => return self.build_flat_items_by_org(hide_inactive),
             GroupByMode::Manual => {}
         }
 
@@ -247,7 +242,7 @@ impl HomeView {
         let pool = if self.sort_order == SortOrder::Attention {
             pool
         } else {
-            shown_in_groups(pool, hide_stopped)
+            shown_in_groups(pool, hide_inactive)
         };
         // Manual grouping + Attention sort is a flat priority view so tiers
         // interleave across groups.
@@ -276,7 +271,7 @@ impl HomeView {
     fn regrouped_instances(
         &self,
         key: impl Fn(&Instance) -> String,
-        hide_stopped: bool,
+        hide_inactive: bool,
     ) -> (Vec<Instance>, Vec<Instance>) {
         let grouped: Vec<Instance> = self
             .cloned_instances_in_active_view()
@@ -292,7 +287,7 @@ impl HomeView {
             .cloned()
             .collect();
         // Seeded before hiding, so a group whose sessions are all hidden keeps its header.
-        (shown_in_groups(grouped, hide_stopped), tree_seed)
+        (shown_in_groups(grouped, hide_inactive), tree_seed)
     }
 
     /// Flatten a derived (project or org) grouping with its collapse state,
@@ -320,8 +315,8 @@ impl HomeView {
         items
     }
 
-    fn build_flat_items_by_project(&self, hide_stopped: bool) -> Vec<Item> {
-        let (grouped, tree_seed) = self.regrouped_instances(project_group_key, hide_stopped);
+    fn build_flat_items_by_project(&self, hide_inactive: bool) -> Vec<Item> {
+        let (grouped, tree_seed) = self.regrouped_instances(project_group_key, hide_inactive);
         let populated_labels: HashSet<String> = tree_seed
             .iter()
             .map(|i| i.group_path.clone())
@@ -375,9 +370,9 @@ impl HomeView {
         self.resolve_org(inst).1
     }
 
-    fn build_flat_items_by_org(&self, hide_stopped: bool) -> Vec<Item> {
+    fn build_flat_items_by_org(&self, hide_inactive: bool) -> Vec<Item> {
         let (grouped, tree_seed) =
-            self.regrouped_instances(|inst| self.org_group_key(inst), hide_stopped);
+            self.regrouped_instances(|inst| self.org_group_key(inst), hide_inactive);
         // The key is not a display name, so seed each group with its owner name.
         let mut seen_keys = HashSet::new();
         let org_groups: Vec<Group> = tree_seed

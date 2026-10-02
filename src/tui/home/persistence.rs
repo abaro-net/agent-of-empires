@@ -431,7 +431,12 @@ impl HomeView {
     /// `mark_unread` folds the Running -> Idle unread mark into the same `Storage::update`
     /// instead of a second flock round-trip on the same row in the same tick, matching the
     /// daemon's per-tick batching. Terminal rows only; see the `is_structured()` return.
-    pub(in crate::tui) fn persist_passive_status_transition(&self, id: &str, mark_unread: bool) {
+    pub(in crate::tui) fn persist_passive_status_transition(
+        &self,
+        id: &str,
+        mark_unread: bool,
+        wake: bool,
+    ) {
         let Some(inst) = self.instances.get(id) else {
             return;
         };
@@ -459,6 +464,9 @@ impl HomeView {
                 disk.merge_passive_status_patch(id, &patch);
                 if mark_unread {
                     disk.mark_unread();
+                }
+                if wake {
+                    disk.unsnooze();
                 }
             }
             Ok(())
