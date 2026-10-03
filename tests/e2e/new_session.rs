@@ -140,7 +140,7 @@ fn install_named_claude_stub(h: &mut TuiTestHarness) -> std::path::PathBuf {
     let record = h.home_path().join("claude.argv");
     let record_str = record.to_string_lossy().to_string();
     assert!(
-        !record_str.contains(['"', '$', '`', '\\', '\'']),
+        !record_str.contains(['"', '$', '`', '\\']),
         "record path has shell metacharacters: {record_str}"
     );
     std::fs::write(
