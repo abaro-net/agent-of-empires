@@ -490,14 +490,7 @@ fn live_send_ends_when_its_session_is_hidden() {
     let mut env = env_with_stopped(true);
     press_y(&mut env);
     let id = select_session(&mut env, "util-live");
-    let title = env.view.get_instance(&id).unwrap().title.clone();
-    let mut state = live_send_state(
-        &id,
-        &title,
-        &crate::tmux::TerminalSession::resolve_name(&id, &title),
-    );
-    state.target = crate::tui::home::live_send::LiveSendTarget::Terminal;
-    env.view.live_send = Some(state);
+    live_send_to_terminal(&mut env, &id);
 
     Storage::new_unwatched("test")
         .unwrap()
@@ -513,4 +506,58 @@ fn live_send_ends_when_its_session_is_hidden() {
     assert!(!session_titles(&env.view).contains(&"util-live".to_string()));
     assert!(env.view.live_send.is_none(), "live-send ends with its row");
     assert_eq!(env.view.selected_group.as_deref(), Some("util"));
+}
+
+fn live_send_to_terminal(env: &mut TestEnv, id: &str) {
+    let title = env.view.get_instance(id).unwrap().title.clone();
+    let mut state = live_send_state(
+        id,
+        &title,
+        &crate::tmux::TerminalSession::resolve_name(id, &title),
+    );
+    state.target = crate::tui::home::live_send::LiveSendTarget::Terminal;
+    env.view.live_send = Some(state);
+}
+
+/// Live-send on a stopped session's terminal ends when a sort change (as the sort picker
+/// submits it) moves the list out of Attention and the filter hides the session.
+#[test]
+#[serial]
+fn live_send_ends_when_a_sort_change_hides_its_session() {
+    let mut env = env_with_stopped(true);
+    env.view.apply_sort_order(SortOrder::Attention);
+    press_y(&mut env);
+    let id = select_session(&mut env, "util-stopped-a");
+    live_send_to_terminal(&mut env, &id);
+    env.view.rebuild_flat_items();
+    assert!(
+        env.view.live_send.is_some(),
+        "shown under Attention, so still live"
+    );
+
+    env.view.apply_sort_order(SortOrder::AZ);
+
+    assert!(!session_titles(&env.view).contains(&"util-stopped-a".to_string()));
+    assert!(env.view.live_send.is_none());
+}
+
+/// Live-send on an ungrouped stopped session ends when a grouping change (as the group picker
+/// submits it) puts the session in a group the filter hides it from.
+#[test]
+#[serial]
+fn live_send_ends_when_a_grouping_change_hides_its_session() {
+    let mut env = env_with_stopped(true);
+    press_y(&mut env);
+    let id = select_session(&mut env, "loose-stopped");
+    live_send_to_terminal(&mut env, &id);
+    env.view.rebuild_flat_items();
+    assert!(
+        env.view.live_send.is_some(),
+        "ungrouped, so shown and still live"
+    );
+
+    env.view.apply_group_by(GroupByMode::Project);
+
+    assert!(!session_titles(&env.view).contains(&"loose-stopped".to_string()));
+    assert!(env.view.live_send.is_none());
 }

@@ -169,6 +169,7 @@ impl HomeView {
         } else {
             HashMap::new()
         };
+        self.end_live_send_if_hidden();
     }
 
     pub(super) fn toggle_hide_stopped_in_groups(&mut self) {

@@ -4164,7 +4164,7 @@ impl HomeView {
         }
     }
 
-    fn apply_group_by(&mut self, new_mode: GroupByMode) {
+    pub(super) fn apply_group_by(&mut self, new_mode: GroupByMode) {
         self.group_by = new_mode;
         self.rebuild_flat_items();
         self.reseat_cursor_after_rebuild();
@@ -6027,20 +6027,34 @@ impl HomeView {
         }
     }
 
-    /// End live-send when the `y` filter has just taken its target's row away: a stopped
-    /// session's terminal can outlive its agent, and keys must not reach a pane the list no
-    /// longer shows.
+    /// End live-send when a rebuild has left its target hidden by the `y` filter, whatever
+    /// changed (its status, the sort, the grouping, its group): a stopped session's terminal
+    /// can outlive its agent, and keys must not reach a pane the list no longer shows. The
+    /// selection is left for the caller's rebuild to settle.
     pub(super) fn end_live_send_if_hidden(&mut self) {
         let Some(state) = self.live_send.clone() else {
             return;
         };
-        if self
+        if !self
             .get_instance(&state.session_id)
             .is_some_and(|inst| self.hidden_by_filter(inst))
         {
-            self.exit_live_send_and_restore_sizing(&state);
-            self.flash_status("Live send ended: its session stopped and is hidden (y to show)");
+            return;
         }
+        let selection = (
+            self.cursor,
+            self.selected_session.clone(),
+            self.selected_group.clone(),
+            self.selected_group_profile.clone(),
+        );
+        self.exit_live_send_and_restore_sizing(&state);
+        (
+            self.cursor,
+            self.selected_session,
+            self.selected_group,
+            self.selected_group_profile,
+        ) = selection;
+        self.flash_status("Live send ended: its session is hidden (y to show)");
     }
 
     /// Tear down live-send state and restore the tmux window's automatic sizing:
