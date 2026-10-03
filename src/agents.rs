@@ -1007,20 +1007,28 @@ fn run_agent_help(program: &std::path::Path, timeout: std::time::Duration) -> Op
 
 type SharedHelpProbe = std::sync::Arc<std::sync::Mutex<HelpProbe>>;
 
-static HELP_PROBES: std::sync::Mutex<BTreeMap<std::path::PathBuf, SharedHelpProbe>> =
+/// The resolved executable plus its modification time and size, so an update that swaps the
+/// binary behind a path, or a symlink to it, is probed afresh.
+type HelpProbeKey = (std::path::PathBuf, Option<std::time::SystemTime>, u64);
+
+static HELP_PROBES: std::sync::Mutex<BTreeMap<HelpProbeKey, SharedHelpProbe>> =
     std::sync::Mutex::new(BTreeMap::new());
 
 /// Whether `program --help` advertises `flag`, for a flag an older install would reject outright.
-/// The probe and its cached answer are bound to the absolute executable, so neither the probe's
+/// The probe and its cached answer are bound to the resolved executable, so neither the probe's
 /// own working directory nor another install found on `PATH` can stand in for it.
 fn agent_help_advertises(program: &std::path::Path, flag: &str) -> bool {
-    let Ok(program) = std::path::absolute(program) else {
+    let Ok(program) = std::fs::canonicalize(program) else {
         return false;
     };
+    let Ok(metadata) = std::fs::metadata(&program) else {
+        return false;
+    };
+    let key = (program.clone(), metadata.modified().ok(), metadata.len());
     let probe = HELP_PROBES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .entry(program.clone())
+        .entry(key)
         .or_default()
         .clone();
     // Held across the probe: launches of this binary racing it wait for the answer instead of
@@ -1471,6 +1479,59 @@ mod tests {
         assert!(
             !agent_help_advertises(&older, "--name"),
             "an answer cached for one install was reused for another"
+        );
+        forget_agent_help_for_test();
+    }
+
+    /// An update replaces the executable behind the same path, in place or by moving a symlink to
+    /// a new version, and the new one is probed rather than answered from the old one's help.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn a_help_probe_reprobes_an_executable_replaced_behind_its_path() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let write = |path: &std::path::Path, help: &str| {
+            std::fs::write(path, format!("#!/bin/sh\nprintf '%s\\n' '{help}'\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        forget_agent_help_for_test();
+
+        let in_place = temp.path().join("claude");
+        write(&in_place, "  -r, --resume [value]");
+        assert!(!agent_help_advertises(&in_place, "--name"));
+        write(&in_place, "  -n, --name <name>  Set a display name");
+        assert!(
+            agent_help_advertises(&in_place, "--name"),
+            "an executable replaced in place kept its old answer"
+        );
+
+        let old = temp.path().join("claude-1");
+        let new = temp.path().join("claude-2");
+        write(&old, "  -r, --resume <id>");
+        write(&new, "  -n, --name <name>");
+        let same_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for version in [&old, &new] {
+            std::fs::File::options()
+                .write(true)
+                .open(version)
+                .unwrap()
+                .set_modified(same_time)
+                .unwrap();
+        }
+        assert_eq!(
+            std::fs::metadata(&old).unwrap().len(),
+            std::fs::metadata(&new).unwrap().len(),
+            "the versions differ only by identity"
+        );
+        let link = temp.path().join("current");
+        std::os::unix::fs::symlink(&old, &link).unwrap();
+        assert!(!agent_help_advertises(&link, "--name"));
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&new, &link).unwrap();
+        assert!(
+            agent_help_advertises(&link, "--name"),
+            "a symlink moved to a new version kept the old version's answer"
         );
         forget_agent_help_for_test();
     }
