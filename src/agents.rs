@@ -932,9 +932,13 @@ impl AgentDef {
         }
     }
 
-    pub(crate) fn supported_session_name_flag(&self) -> Option<&'static str> {
+    /// The session-name flag, if the `--help` of `program`, the executable the launch runs, lists it.
+    pub(crate) fn supported_session_name_flag(
+        &self,
+        program: &std::path::Path,
+    ) -> Option<&'static str> {
         let flag = self.session_name_flag()?;
-        agent_help_advertises(self.binary, flag).then_some(flag)
+        agent_help_advertises(program, flag).then_some(flag)
     }
 
     pub fn launch_base_command(&self) -> String {
@@ -987,8 +991,8 @@ impl HelpProbe {
     }
 }
 
-fn run_agent_help(binary: &str, timeout: std::time::Duration) -> Option<String> {
-    let mut cmd = std::process::Command::new(binary);
+fn run_agent_help(program: &std::path::Path, timeout: std::time::Duration) -> Option<String> {
+    let mut cmd = std::process::Command::new(program);
     cmd.arg("--help");
     // An agent that reads stdin would hold the pipe until the deadline, and one that writes a
     // file would drop it wherever the caller happened to be.
@@ -1003,15 +1007,20 @@ fn run_agent_help(binary: &str, timeout: std::time::Duration) -> Option<String> 
 
 type SharedHelpProbe = std::sync::Arc<std::sync::Mutex<HelpProbe>>;
 
-static HELP_PROBES: std::sync::Mutex<BTreeMap<&'static str, SharedHelpProbe>> =
+static HELP_PROBES: std::sync::Mutex<BTreeMap<std::path::PathBuf, SharedHelpProbe>> =
     std::sync::Mutex::new(BTreeMap::new());
 
-/// Whether `binary --help` advertises `flag`, for a flag an older install would reject outright.
-fn agent_help_advertises(binary: &'static str, flag: &str) -> bool {
+/// Whether `program --help` advertises `flag`, for a flag an older install would reject outright.
+/// The probe and its cached answer are bound to the absolute executable, so neither the probe's
+/// own working directory nor another install found on `PATH` can stand in for it.
+fn agent_help_advertises(program: &std::path::Path, flag: &str) -> bool {
+    let Ok(program) = std::path::absolute(program) else {
+        return false;
+    };
     let probe = HELP_PROBES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .entry(binary)
+        .entry(program.clone())
         .or_default()
         .clone();
     // Held across the probe: launches of this binary racing it wait for the answer instead of
@@ -1021,22 +1030,26 @@ fn agent_help_advertises(binary: &'static str, flag: &str) -> bool {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     help_advertises_flag(
         probe.help(std::time::Instant::now, |timeout| {
-            run_agent_help(binary, timeout)
+            run_agent_help(&program, timeout)
         }),
         flag,
     )
 }
 
 #[cfg(test)]
-pub(crate) fn forget_agent_help_for_test(binary: &str) {
+pub(crate) fn forget_agent_help_for_test() {
     HELP_PROBES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(binary);
+        .clear();
 }
 
+/// Probes the `pi` that AoE's own `PATH` and working directory resolve, the executable
+/// `runs_host_path_binary` compares a launch against.
 fn pi_help_advertises(flag: &str) -> bool {
-    get_agent("pi").is_some_and(|agent| agent_help_advertises(agent.binary, flag))
+    get_agent("pi")
+        .and_then(|agent| which::which(agent.binary).ok())
+        .is_some_and(|program| agent_help_advertises(&program, flag))
 }
 
 pub(crate) fn pi_supports_extension_flag() -> bool {
@@ -1403,10 +1416,10 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        forget_agent_help_for_test("claude");
-        forget_agent_help_for_test("pi");
+        forget_agent_help_for_test();
 
-        let claude = std::thread::spawn(|| agent_help_advertises("claude", "--name"));
+        let claude_program = temp.path().join("bin/claude");
+        let claude = std::thread::spawn(move || agent_help_advertises(&claude_program, "--name"));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !started.exists() {
             assert!(
@@ -1422,8 +1435,44 @@ mod tests {
         assert!(!release.exists() && !claude.is_finished());
         std::fs::write(&release, "").unwrap();
         assert!(claude.join().unwrap());
-        forget_agent_help_for_test("claude");
-        forget_agent_help_for_test("pi");
+        forget_agent_help_for_test();
+    }
+
+    /// The probe runs the absolute executable it is asked about. Run by bare name from its
+    /// temporary working directory, a relative `PATH` entry would resolve there and probe a
+    /// different install, and one cached answer would stand for every install.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn a_help_probe_answers_for_the_executable_it_is_given() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let install = |dir: &str, help: &str| {
+            let bin = temp.path().join(dir).join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let program = bin.join("claude");
+            std::fs::write(&program, format!("#!/bin/sh\nprintf '%s\\n' '{help}'\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            program
+        };
+        let current = install("current", "  -n, --name <name>");
+        let older = install("older", "  -r, --resume [value]");
+        install("probe-cwd", "  -r, --resume [value]");
+        let _env = crate::session::test_support::EnvGuard::set(&[
+            ("PATH", "bin"),
+            ("TMPDIR", temp.path().join("probe-cwd").to_str().unwrap()),
+        ]);
+        forget_agent_help_for_test();
+
+        assert!(
+            agent_help_advertises(&current, "--name"),
+            "the probe ran another claude than the one given"
+        );
+        assert!(
+            !agent_help_advertises(&older, "--name"),
+            "an answer cached for one install was reused for another"
+        );
+        forget_agent_help_for_test();
     }
 
     #[test]

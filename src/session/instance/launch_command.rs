@@ -70,15 +70,14 @@ fn apply_first_launch_agent_name(
     // The probe vouches only for the binary AoE's PATH finds. An attested execution also admits
     // only allowlisted arguments, so a wrapper, a `--` or the user's own `-n`/`--name` never
     // reaches this point.
-    let probed_binary_launches = execution.is_some_and(|execution| {
+    let Some(execution) = execution.filter(|execution| {
         execution
             .inputs
             .runs_host_path_binary(agent.binary, &execution.program)
-    });
-    if !probed_binary_launches {
+    }) else {
         return;
-    }
-    if let Some(flag) = agent.supported_session_name_flag() {
+    };
+    if let Some(flag) = agent.supported_session_name_flag(&execution.program) {
         cmd.push_str(&format!(" {} {}", flag, shell_escape(title)));
     }
 }
@@ -996,7 +995,7 @@ mod tests {
         help: &str,
         probed: &std::path::Path,
     ) -> crate::session::test_support::EnvGuard {
-        crate::agents::forget_agent_help_for_test("claude");
+        crate::agents::forget_agent_help_for_test();
         crate::session::test_support::install_login_shell_path_command(
             root,
             "claude",
