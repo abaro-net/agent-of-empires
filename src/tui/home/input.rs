@@ -3890,6 +3890,7 @@ impl HomeView {
                 if visible_sessions.contains(&inst.id)
                     || current_session.as_deref() == Some(inst.id.as_str())
                     || inst.is_dismissed()
+                    || self.hidden_by_filter(inst)
                 {
                     return false;
                 }
@@ -4134,6 +4135,12 @@ impl HomeView {
                         return;
                     }
                 }
+            }
+            if let Some(header) = self.header_row_for_hidden_session(&sid) {
+                self.cursor = header;
+                self.update_selected();
+                self.context_menu = None;
+                return;
             }
         }
         if self.flat_items.is_empty() {

@@ -561,3 +561,105 @@ fn live_send_ends_when_a_grouping_change_hides_its_session() {
     assert!(!session_titles(&env.view).contains(&"loose-stopped".to_string()));
     assert!(env.view.live_send.is_none());
 }
+
+fn cursor_row_session(view: &HomeView) -> Option<String> {
+    match view.flat_items.get(view.cursor)? {
+        Item::Session { id, .. } => Some(id.clone()),
+        Item::Group { .. } => None,
+    }
+}
+
+/// A sort or grouping change can start hiding the selected session. The selection moves to
+/// that session's own group header, never to whichever session now sits at its old index.
+#[test]
+#[serial]
+fn a_projection_change_that_hides_the_selection_selects_its_own_header() {
+    type Change = fn(&mut HomeView);
+    let cases: [(&str, &str, Change, Change); 2] = [
+        (
+            "sort",
+            "util-stopped-a",
+            |view| view.apply_sort_order(SortOrder::Attention),
+            |view| view.apply_sort_order(SortOrder::AZ),
+        ),
+        (
+            "grouping",
+            "loose-stopped",
+            |_| {},
+            |view| view.apply_group_by(GroupByMode::Project),
+        ),
+    ];
+    for (case, title, before, change) in cases {
+        let mut env = env_with_stopped(true);
+        before(&mut env.view);
+        press_y(&mut env);
+        let id = select_session(&mut env, title);
+        assert_eq!(
+            env.view.selected_session.as_deref(),
+            Some(id.as_str()),
+            "{case}"
+        );
+
+        change(&mut env.view);
+
+        assert!(
+            !session_titles(&env.view).contains(&title.to_string()),
+            "{case}: hidden"
+        );
+        assert_eq!(
+            env.view.selected_session, None,
+            "{case}: no other session selected"
+        );
+        let header = match env.view.group_by {
+            GroupByMode::Project => {
+                super::super::rows::project_group_key(env.view.get_instance(&id).unwrap())
+            }
+            _ => env.view.get_instance(&id).unwrap().group_path.clone(),
+        };
+        assert!(
+            matches!(&env.view.flat_items[env.view.cursor], Item::Group { path, .. } if *path == header),
+            "{case}: cursor on its own {header} header"
+        );
+        assert_eq!(
+            env.view.selected_group.as_deref(),
+            Some(header.as_str()),
+            "{case}"
+        );
+    }
+}
+
+/// `w` passes over an unread session the filter hides: selecting it would leave the preview and
+/// the next action on a row the list does not show. Shown again, the same session is the target.
+#[test]
+#[serial]
+fn w_skips_an_unread_session_the_filter_hides() {
+    let unread_before = crate::session::unread_enabled();
+    crate::session::set_unread_enabled(true);
+    let mut env = env_with_stopped(true);
+    let hidden = select_session(&mut env, "util-stopped-a");
+    env.view.mutate_instance(&hidden, |inst| inst.mark_unread());
+    press_y(&mut env);
+    let live = select_session(&mut env, "util-live");
+
+    env.view.handle_key(key(KeyCode::Char('w')), None);
+    assert_eq!(env.view.selected_session.as_deref(), Some(live.as_str()));
+    assert_eq!(
+        cursor_row_session(&env.view).as_deref(),
+        Some(live.as_str())
+    );
+
+    env.view.info_dialog = None;
+    press_y(&mut env);
+    select_session(&mut env, "util-live");
+    env.view.handle_key(key(KeyCode::Char('w')), None);
+    assert_eq!(
+        env.view.selected_session.as_deref(),
+        Some(hidden.as_str()),
+        "shown, the unread session is what w finds"
+    );
+    assert_eq!(
+        cursor_row_session(&env.view).as_deref(),
+        Some(hidden.as_str())
+    );
+    crate::session::set_unread_enabled(unread_before);
+}

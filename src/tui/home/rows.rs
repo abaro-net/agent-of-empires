@@ -212,33 +212,27 @@ impl HomeView {
         grouped && !inst.is_archived() && !inst.is_trashed()
     }
 
-    /// The header above the selected session's row, read before a rebuild, so a selected
-    /// session that drops out can hand the selection to its own group.
-    pub(super) fn selected_session_header(&self) -> Option<(String, Option<String>)> {
-        self.selected_session.as_ref()?;
-        self.flat_items[..self.cursor.min(self.flat_items.len())]
-            .iter()
-            .rev()
-            .find_map(|item| match item {
-                Item::Group { path, profile, .. } => Some((path.clone(), profile.clone())),
-                Item::Session { .. } => None,
-            })
-    }
-
-    /// Where `header` sits now, when the selected session itself has just been hidden.
-    pub(super) fn header_row_for_hidden_selection(
-        &self,
-        header: &(String, Option<String>),
-    ) -> Option<usize> {
-        let id = self.selected_session.as_ref()?;
-        if !self.hide_stopped_in_groups
-            || self.get_instance(id)?.status != crate::session::Status::Stopped
+    /// The row of the group header session `id` sits under while the `y` filter hides it, so a
+    /// selection that drops out moves to its own group rather than to whichever row now has its
+    /// index. Read from the unfiltered rows of the current grouping, where a session follows its
+    /// own group's header.
+    pub(super) fn header_row_for_hidden_session(&self, id: &str) -> Option<usize> {
+        if !self
+            .get_instance(id)
+            .is_some_and(|inst| self.hidden_by_filter(inst))
         {
             return None;
         }
+        let unfiltered = self.build_flat_items_hiding(false);
+        let at = unfiltered
+            .iter()
+            .position(|item| matches!(item, Item::Session { id: sid, .. } if sid == id))?;
+        let (path, profile) = unfiltered[..at].iter().rev().find_map(|item| match item {
+            Item::Group { path, profile, .. } => Some((path, profile)),
+            Item::Session { .. } => None,
+        })?;
         self.flat_items.iter().position(|item| {
-            matches!(item, Item::Group { path, profile, .. }
-                if *path == header.0 && *profile == header.1)
+            matches!(item, Item::Group { path: p, profile: pr, .. } if p == path && pr == profile)
         })
     }
 

@@ -18,7 +18,6 @@ impl HomeView {
 
     /// Rebuild `flat_items` and move the cursor back onto the selected session or group.
     pub(super) fn rebuild_flat_items_keeping_cursor(&mut self) {
-        let header_before = self.selected_session_header();
         self.rebuild_flat_items();
         let restored = match (&self.selected_session, &self.selected_group) {
             (Some(sid), _) => self.session_row(sid),
@@ -43,9 +42,9 @@ impl HomeView {
         };
         let hidden_header = restored
             .is_none()
-            .then_some(header_before)
+            .then(|| self.selected_session.clone())
             .flatten()
-            .and_then(|header| self.header_row_for_hidden_selection(&header));
+            .and_then(|sid| self.header_row_for_hidden_session(&sid));
         if let Some(header) = hidden_header {
             self.cursor = header;
             self.update_selected();
