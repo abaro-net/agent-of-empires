@@ -9,8 +9,13 @@ impl HomeView {
             .position(|item| matches!(item, Item::Session { id, .. } if id == session_id))
     }
 
+    /// Select `session_id`'s row, or its group header while the `y` filter hides it, so the
+    /// selection never names a session the list does not show.
     pub fn select_session_by_id(&mut self, session_id: &str) {
-        if let Some(idx) = self.session_row(session_id) {
+        if let Some(idx) = self
+            .session_row(session_id)
+            .or_else(|| self.header_row_for_hidden_session(session_id))
+        {
             self.cursor = idx;
             self.update_selected();
         }

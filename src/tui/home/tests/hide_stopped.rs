@@ -663,3 +663,64 @@ fn w_skips_an_unread_session_the_filter_hides() {
     );
     crate::session::set_unread_enabled(unread_before);
 }
+
+/// Restoring a stopped session from Archived or Trash while the filter is on brings it back
+/// into a group that hides it. The selection follows it to its group's header, so the cursor
+/// row and the session the next key acts on agree.
+#[test]
+#[serial]
+fn restoring_a_session_the_filter_hides_selects_its_own_header() {
+    type Shelve = fn(&mut HomeView, &str);
+    let cases: [(&str, Shelve); 2] = [
+        ("archive", |view, id| {
+            view.select_session_by_id(id);
+            view.toggle_archive_at_cursor().unwrap();
+            assert!(view.get_instance(id).unwrap().is_archived());
+        }),
+        ("trash", |view, id| {
+            view.selected_session = Some(id.to_string());
+            view.trash_session_by_id(id);
+            assert!(view.get_instance(id).unwrap().is_trashed());
+        }),
+    ];
+    for (case, shelve) in cases {
+        let mut env = env_with_stopped(true);
+        env.view.archived_section_collapsed = false;
+        env.view.trashed_section_collapsed = false;
+        let id = select_session(&mut env, "util-stopped-a");
+        shelve(&mut env.view, &id);
+        press_y(&mut env);
+        select_session(&mut env, "util-stopped-a");
+        assert_eq!(
+            env.view.selected_session.as_deref(),
+            Some(id.as_str()),
+            "{case}: on the shelf"
+        );
+
+        env.view.toggle_archive_at_cursor().unwrap();
+
+        let inst = env.view.get_instance(&id).unwrap();
+        assert!(
+            !inst.is_archived() && !inst.is_trashed(),
+            "{case}: restored"
+        );
+        assert_eq!(
+            inst.status,
+            Status::Stopped,
+            "{case}: restore keeps it stopped"
+        );
+        assert!(
+            !session_titles(&env.view).contains(&"util-stopped-a".to_string()),
+            "{case}: hidden"
+        );
+        assert_eq!(
+            env.view.selected_session, None,
+            "{case}: the hidden session is not the target"
+        );
+        assert!(
+            matches!(&env.view.flat_items[env.view.cursor], Item::Group { path, .. } if path == "util"),
+            "{case}: cursor on its util header"
+        );
+        assert_eq!(env.view.selected_group.as_deref(), Some("util"), "{case}");
+    }
+}
