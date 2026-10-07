@@ -948,11 +948,13 @@ pub static BINDINGS: &[Binding] = &[
         context: Context::Always,
         help: Some(HelpMeta {
             section: HelpSection::Views,
-            desc: "Hide stopped sessions in groups (toggle)",
+            desc: "Hide stopped, then empty groups (cycle)",
         }),
         palette: Some(PaletteMeta {
-            title: "Hide stopped sessions in groups",
-            keywords: &["hide", "show", "stopped", "grey", "compact", "filter"],
+            title: "Hide stopped sessions in groups, then emptied groups",
+            keywords: &[
+                "hide", "show", "stopped", "grey", "compact", "filter", "empty", "groups",
+            ],
             group: PaletteGroup::Views,
         }),
     },

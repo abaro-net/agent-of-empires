@@ -1,8 +1,10 @@
-//! `y` hides stopped sessions inside groups and shows `shown/total` on their headers.
+//! `y` hides stopped sessions inside groups and shows `shown/total` on their headers; a second
+//! press also hides the groups left with nothing shown, and a third shows everything.
 
 use super::*;
 use crate::session::config::{GroupByMode, SortOrder};
 use crate::session::Status;
+use crate::tui::home::StoppedFilter;
 
 fn with_status(mut inst: Instance, status: Status) -> Instance {
     inst.status = status;
@@ -60,6 +62,17 @@ fn press_y(env: &mut TestEnv) {
     env.view.handle_key(key(KeyCode::Char('y')), None);
 }
 
+/// Presses `y` through the rest of the cycle, back to showing everything.
+fn show_all(env: &mut TestEnv) {
+    for _ in 0..2 {
+        if env.view.stopped_filter == StoppedFilter::Off {
+            break;
+        }
+        press_y(env);
+    }
+    assert_eq!(env.view.stopped_filter, StoppedFilter::Off);
+}
+
 #[test]
 #[serial]
 fn y_hides_stopped_sessions_in_groups_and_counts_them_on_the_header() {
@@ -81,7 +94,7 @@ fn y_hides_stopped_sessions_in_groups_and_counts_them_on_the_header() {
         "a group whose sessions are all hidden keeps its header"
     );
 
-    press_y(&mut env);
+    show_all(&mut env);
     assert_eq!(session_titles(&env.view).len(), 6);
     assert!(header_text(&env.view, "util").contains("util (3)"));
 }
@@ -132,6 +145,12 @@ fn attention_sort_and_the_archived_section_hide_nothing() {
     assert!(
         shown.contains(&"util-archived".to_string()),
         "the Archived section is not a group to hide in: {shown:?}"
+    );
+
+    press_y(&mut env);
+    assert!(
+        session_titles(&env.view).contains(&"util-archived".to_string()),
+        "the Archived section is not emptied by hiding, so it keeps its header"
     );
 
     env.view.apply_sort_order(SortOrder::Attention);
@@ -311,7 +330,7 @@ fn custom_moves_wait_until_stopped_sessions_are_shown() {
         "a group header moves among groups, which hiding does not touch"
     );
 
-    press_y(&mut env);
+    show_all(&mut env);
     select_session(&mut env, "util-live");
     env.view.move_row_at_cursor(-1).unwrap();
     let moved: Vec<_> = env
@@ -410,18 +429,22 @@ fn each_profile_counts_its_own_copy_of_a_group() {
 
 #[test]
 #[serial]
-fn the_toggle_says_what_it_did() {
+fn the_toggle_says_which_state_it_entered() {
     let mut env = env_with_stopped(true);
-    press_y(&mut env);
-    assert!(env
-        .view
-        .status_flash_text()
-        .is_some_and(|t| t.contains("hidden")));
-    press_y(&mut env);
-    assert!(env
-        .view
-        .status_flash_text()
-        .is_some_and(|t| t.contains("Showing")));
+    for expected in [
+        "Stopped sessions in groups hidden",
+        "Groups with nothing shown hidden",
+        "Showing",
+    ] {
+        press_y(&mut env);
+        assert!(
+            env.view
+                .status_flash_text()
+                .is_some_and(|t| t.starts_with(expected)),
+            "{expected}: {:?}",
+            env.view.status_flash_text()
+        );
+    }
 }
 
 /// A hidden structured session the daemon reports working again comes back into its group.
@@ -649,7 +672,7 @@ fn w_skips_an_unread_session_the_filter_hides() {
     );
 
     env.view.info_dialog = None;
-    press_y(&mut env);
+    show_all(&mut env);
     select_session(&mut env, "util-live");
     env.view.handle_key(key(KeyCode::Char('w')), None);
     assert_eq!(
@@ -723,4 +746,456 @@ fn restoring_a_session_the_filter_hides_selects_its_own_header() {
         );
         assert_eq!(env.view.selected_group.as_deref(), Some("util"), "{case}");
     }
+}
+
+fn has_header(view: &HomeView, group: &str) -> bool {
+    view.flat_items
+        .iter()
+        .any(|item| matches!(item, Item::Group { path, .. } if path == group))
+}
+
+#[test]
+#[serial]
+fn a_second_y_hides_groups_left_with_nothing_shown_and_a_third_shows_all() {
+    let mut env = env_with_stopped(true);
+    press_y(&mut env);
+    assert!(header_text(&env.view, "ops").contains("ops (0/2)"));
+
+    press_y(&mut env);
+    assert!(!has_header(&env.view, "ops"), "every ops session is hidden");
+    assert!(header_text(&env.view, "util").contains("util (1/3)"));
+    let mut shown = session_titles(&env.view);
+    shown.sort();
+    assert_eq!(shown, vec!["loose-stopped", "util-live"]);
+
+    press_y(&mut env);
+    assert_eq!(session_titles(&env.view).len(), 6);
+    assert!(header_text(&env.view, "ops").contains("ops (2)"));
+    assert!(header_text(&env.view, "util").contains("util (3)"));
+}
+
+/// A group stays while anything under it is shown, its subgroups included, and goes with
+/// everything nested under it once nothing is. A group that never held a session stays.
+#[test]
+#[serial]
+fn emptied_groups_hide_with_their_subgroups_and_parents_follow_their_children() {
+    let mut env = seeded_env(
+        test_home(),
+        &[
+            with_status(
+                instance_in("mixed-stopped", "/tmp/m", "mixed"),
+                Status::Stopped,
+            ),
+            with_status(
+                instance_in("mixed-live", "/tmp/m", "mixed/live"),
+                Status::Idle,
+            ),
+            with_status(
+                instance_in("dead-stopped", "/tmp/d", "dead"),
+                Status::Stopped,
+            ),
+            with_status(
+                instance_in("dead-sub-stopped", "/tmp/d", "dead/sub"),
+                Status::Stopped,
+            ),
+            with_status(instance_in("half-live", "/tmp/h", "half"), Status::Idle),
+            with_status(
+                instance_in("half-gone-stopped", "/tmp/h", "half/gone"),
+                Status::Stopped,
+            ),
+        ],
+        true,
+    );
+    let tree = env.view.group_trees.get_mut("test").unwrap();
+    tree.create_group("dead/empty");
+    tree.create_group("spare");
+    env.view.apply_sort_order(SortOrder::AZ);
+    press_y(&mut env);
+    press_y(&mut env);
+
+    for (group, shown) in [
+        ("mixed", true),
+        ("mixed/live", true),
+        ("half", true),
+        ("half/gone", false),
+        ("dead", false),
+        ("dead/sub", false),
+        ("dead/empty", false),
+        ("spare", true),
+    ] {
+        assert_eq!(has_header(&env.view, group), shown, "{group}");
+    }
+    assert!(header_text(&env.view, "mixed").contains("mixed (1/2)"));
+    assert!(header_text(&env.view, "spare").contains("spare (0)"));
+    let mut sessions = session_titles(&env.view);
+    sessions.sort();
+    assert_eq!(sessions, vec!["half-live", "mixed-live"]);
+}
+
+#[test]
+#[serial]
+fn project_grouping_hides_its_own_emptied_groups() {
+    let mut env = env_with_stopped(false);
+    env.view.group_by = GroupByMode::Project;
+    env.view.rebuild_flat_items();
+    press_y(&mut env);
+    assert!(has_header(&env.view, "loose"));
+
+    press_y(&mut env);
+    assert!(!has_header(&env.view, "loose"));
+    assert!(!has_header(&env.view, "ops"));
+    assert!(header_text(&env.view, "util").contains("util (1/3)"));
+}
+
+/// Roots in AZ order with one ungrouped live session above them: `a` all stopped, `b` live
+/// with an all-stopped subgroup `b/q`, `c` all stopped, `d` live, `e` all stopped.
+fn env_with_groups_to_empty() -> TestEnv {
+    let mut env = seeded_env(
+        test_home(),
+        &[
+            with_status(Instance::new("loose-live", "/tmp/loose"), Status::Idle),
+            with_status(instance_in("a-stopped", "/tmp/a", "a"), Status::Stopped),
+            with_status(instance_in("b-live", "/tmp/b", "b"), Status::Idle),
+            with_status(instance_in("q-stopped", "/tmp/b", "b/q"), Status::Stopped),
+            with_status(instance_in("c-stopped", "/tmp/c", "c"), Status::Stopped),
+            with_status(instance_in("d-live", "/tmp/d", "d"), Status::Idle),
+            with_status(instance_in("e-stopped", "/tmp/e", "e"), Status::Stopped),
+        ],
+        true,
+    );
+    env.view.apply_sort_order(SortOrder::AZ);
+    env
+}
+
+fn select_header(env: &mut TestEnv, group: &str) {
+    env.view.cursor = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { path, .. } if path == group))
+        .unwrap_or_else(|| panic!("no {group} header"));
+    env.view.update_selected();
+}
+
+fn assert_on_header(view: &HomeView, group: &str, case: &str) {
+    assert_eq!(view.selected_session, None, "{case}: no session selected");
+    assert_eq!(view.selected_group.as_deref(), Some(group), "{case}");
+    assert!(
+        matches!(&view.flat_items[view.cursor], Item::Group { path, .. } if path == group),
+        "{case}: cursor on the {group} header"
+    );
+}
+
+/// A selection whose row the second `y` hides moves to its closest enclosing group still shown,
+/// else the next shown header, else the previous one; never to a session.
+#[test]
+#[serial]
+fn a_selection_the_second_y_hides_moves_to_the_nearest_shown_header() {
+    let cases = [
+        ("a", "b", "the next header"),
+        ("b/q", "b", "its parent"),
+        ("c", "d", "the next header"),
+        ("e", "d", "the previous header, nothing shown after it"),
+        ("q-stopped", "b", "its group's parent"),
+        ("c-stopped", "d", "the header after its group"),
+    ];
+    for (target, expected, case) in cases {
+        let mut env = env_with_groups_to_empty();
+        if target.ends_with("-stopped") {
+            select_session(&mut env, target);
+            press_y(&mut env);
+        } else {
+            press_y(&mut env);
+            select_header(&mut env, target);
+        }
+
+        press_y(&mut env);
+
+        assert!(!has_header(&env.view, target), "{case}: {target} hidden");
+        assert_on_header(&env.view, expected, &format!("{target} -> {case}"));
+    }
+}
+
+/// With emptied groups hidden, a group appears and disappears as its last shown session stops
+/// and starts. A menu open on a header that goes closes, and the selection moves to the nearest
+/// shown header; with no header left, to the nearest shown row.
+#[test]
+#[serial]
+fn a_group_follows_its_last_shown_session_and_a_menu_on_it_closes() {
+    let mut env = env_with_groups_to_empty();
+    press_y(&mut env);
+    press_y(&mut env);
+    env.view.list_inner_area = ratatui::layout::Rect::new(1, 1, 28, 20);
+    env.view.list_area = ratatui::layout::Rect::new(0, 0, 30, 22);
+    select_header(&mut env, "d");
+    assert!(env
+        .view
+        .handle_right_click(5, env.view.list_inner_area.y + env.view.cursor as u16));
+    assert!(env.view.context_menu.is_some());
+    let d_live = id_of(&env, "d-live");
+
+    env.view.set_instance_status(&d_live, Status::Stopped);
+    assert!(!has_header(&env.view, "d"));
+    assert!(env.view.context_menu.is_none());
+    assert_on_header(&env.view, "b", "d emptied");
+
+    env.view.set_instance_status(&d_live, Status::Idle);
+    assert!(header_text(&env.view, "d").contains("d (1)"));
+    assert!(session_titles(&env.view).contains(&"d-live".to_string()));
+
+    env.view.set_instance_status(&d_live, Status::Stopped);
+    let b_live = id_of(&env, "b-live");
+    env.view.set_instance_status(&b_live, Status::Stopped);
+    assert!(!has_header(&env.view, "b"));
+    let loose = id_of(&env, "loose-live");
+    assert_eq!(env.view.selected_session.as_deref(), Some(loose.as_str()));
+    assert_eq!(
+        cursor_row_session(&env.view).as_deref(),
+        Some(loose.as_str())
+    );
+}
+
+fn id_of(env: &TestEnv, title: &str) -> String {
+    env.view
+        .instances
+        .values()
+        .find(|i| i.title == title)
+        .map(|i| i.id.clone())
+        .unwrap_or_else(|| panic!("no {title}"))
+}
+
+/// A group move swaps with its neighbour in the store, which may be a hidden group, so it waits
+/// until every group is shown.
+#[test]
+#[serial]
+fn custom_group_moves_wait_until_every_group_is_shown() {
+    let mut env = env_with_groups_to_empty();
+    env.view.apply_sort_order(SortOrder::Custom);
+    let headers = |view: &HomeView| -> Vec<String> {
+        view.flat_items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Group { path, .. } => Some(path.clone()),
+                Item::Session { .. } => None,
+            })
+            .collect()
+    };
+    press_y(&mut env);
+    press_y(&mut env);
+    select_header(&mut env, "d");
+    let before = headers(&env.view);
+
+    env.view.move_row_at_cursor(-1).unwrap();
+    assert!(env
+        .view
+        .status_flash_text()
+        .is_some_and(|t| t.contains("Show all groups")));
+    assert_eq!(headers(&env.view), before);
+
+    show_all(&mut env);
+    select_header(&mut env, "d");
+    let shown = headers(&env.view);
+    env.view.move_row_at_cursor(-1).unwrap();
+    assert_ne!(headers(&env.view), shown, "with every group shown it moves");
+}
+
+/// Restoring a stopped session from Archived into a group whose sessions are all stopped leaves
+/// that group hidden, so the selection moves to the nearest shown header, not to a session.
+#[test]
+#[serial]
+fn restoring_into_an_emptied_group_selects_the_nearest_shown_header() {
+    let mut env = env_with_groups_to_empty();
+    env.view.archived_section_collapsed = false;
+    let id = select_session(&mut env, "c-stopped");
+    env.view.toggle_archive_at_cursor().unwrap();
+    assert!(env.view.get_instance(&id).unwrap().is_archived());
+    press_y(&mut env);
+    press_y(&mut env);
+    select_session(&mut env, "c-stopped");
+
+    env.view.toggle_archive_at_cursor().unwrap();
+
+    assert!(!env.view.get_instance(&id).unwrap().is_archived());
+    assert!(!has_header(&env.view, "c"));
+    assert_on_header(&env.view, "d", "restored into hidden c");
+}
+
+/// In the all-profiles list two profiles can hold the same group path. When one profile's copy
+/// is hidden, its selection moves within its own profile, never onto the other profile's copy.
+#[test]
+#[serial]
+fn a_hidden_group_never_lands_on_another_profiles_group_of_the_same_path() {
+    let (_temp, _guard) = test_home();
+    seed_profile(
+        "alpha",
+        &[with_status(
+            instance_in("a-live", "/tmp/a", "util"),
+            Status::Idle,
+        )],
+    );
+    seed_profile(
+        "beta",
+        &[
+            with_status(instance_in("b-live", "/tmp/b", "util"), Status::Idle),
+            with_status(instance_in("b-stopped", "/tmp/b", "util"), Status::Stopped),
+            with_status(instance_in("z-live", "/tmp/z", "zzz"), Status::Idle),
+        ],
+    );
+    let mut view = test_view(None);
+    view.group_by = GroupByMode::Manual;
+    view.apply_sort_order(SortOrder::AZ);
+    view.handle_key(key(KeyCode::Char('y')), None);
+    view.handle_key(key(KeyCode::Char('y')), None);
+    view.list_inner_area = ratatui::layout::Rect::new(1, 1, 28, 20);
+    view.list_area = ratatui::layout::Rect::new(0, 0, 30, 22);
+    view.cursor = view
+        .flat_items
+        .iter()
+        .position(|item| {
+            matches!(item, Item::Group { path, profile, .. }
+                if path == "util" && profile.as_deref() == Some("beta"))
+        })
+        .expect("beta's util header");
+    view.update_selected();
+    assert!(view.handle_right_click(5, view.list_inner_area.y + view.cursor as u16));
+    assert!(view.context_menu.is_some());
+    let b_live = view
+        .instances
+        .values()
+        .find(|i| i.title == "b-live")
+        .map(|i| i.id.clone())
+        .unwrap();
+
+    view.set_instance_status(&b_live, Status::Stopped);
+
+    assert!(view.context_menu.is_none());
+    assert_eq!(view.selected_group.as_deref(), Some("zzz"));
+    assert_eq!(view.selected_group_profile.as_deref(), Some("beta"));
+    assert!(matches!(
+        &view.flat_items[view.cursor],
+        Item::Group { path, profile, .. } if path == "zzz" && profile.as_deref() == Some("beta")
+    ));
+}
+
+/// When hiding empties the whole list, nothing stays selected and a menu open on the row closes,
+/// whether the last shown session stopped under it or `y` hid the selected header.
+#[test]
+#[serial]
+fn a_list_emptied_by_hiding_selects_nothing() {
+    let mut env = seeded_env(
+        test_home(),
+        &[
+            with_status(instance_in("g-live", "/tmp/g", "g"), Status::Idle),
+            with_status(instance_in("g-stopped", "/tmp/g", "g"), Status::Stopped),
+        ],
+        true,
+    );
+    press_y(&mut env);
+    press_y(&mut env);
+    env.view.list_inner_area = ratatui::layout::Rect::new(1, 1, 28, 20);
+    env.view.list_area = ratatui::layout::Rect::new(0, 0, 30, 22);
+    let id = select_session(&mut env, "g-live");
+    assert!(env
+        .view
+        .handle_right_click(5, env.view.list_inner_area.y + env.view.cursor as u16));
+    assert!(env.view.context_menu.is_some());
+
+    env.view.set_instance_status(&id, Status::Stopped);
+
+    assert!(env.view.flat_items.is_empty());
+    assert_eq!(env.view.selected_session, None);
+    assert!(env.view.context_menu.is_none());
+
+    show_all(&mut env);
+    press_y(&mut env);
+    select_header(&mut env, "g");
+    assert_eq!(env.view.selected_group.as_deref(), Some("g"));
+
+    press_y(&mut env);
+
+    assert!(env.view.flat_items.is_empty());
+    assert_eq!(env.view.selected_group, None);
+    assert_eq!(env.view.selected_group_profile, None);
+}
+
+/// The Archived section sits after every group but is not a neighbouring group, so a hidden last
+/// group selects the shown group before it.
+#[test]
+#[serial]
+fn the_archived_section_is_not_a_neighbouring_group() {
+    let mut env = env_with_groups_to_empty();
+    env.view.archived_section_collapsed = false;
+    let id = select_session(&mut env, "a-stopped");
+    env.view.toggle_archive_at_cursor().unwrap();
+    assert!(env.view.get_instance(&id).unwrap().is_archived());
+    press_y(&mut env);
+    select_header(&mut env, "e");
+
+    press_y(&mut env);
+
+    assert!(session_titles(&env.view).contains(&"a-stopped".to_string()));
+    assert_on_header(&env.view, "d", "e hidden, Archived after it");
+}
+
+/// With nothing hidden, a group moved into another profile that already holds its path is still
+/// found by path, so the selection follows it rather than landing on an unrelated row.
+#[test]
+#[serial]
+fn a_group_moved_into_a_profile_with_the_same_path_keeps_the_selection() {
+    let (_temp, _guard) = test_home();
+    seed_profile(
+        "alpha",
+        &[
+            instance_in("a-one", "/tmp/a1", "aaa"),
+            instance_in("a-two", "/tmp/a2", "work"),
+        ],
+    );
+    seed_profile(
+        "beta",
+        &[
+            instance_in("b-one", "/tmp/b1", "bbb"),
+            instance_in("b-two", "/tmp/b2", "work"),
+        ],
+    );
+    let mut view = test_view(None);
+    view.group_by = GroupByMode::Manual;
+    view.rebuild_flat_items();
+    view.cursor = view
+        .flat_items
+        .iter()
+        .position(|item| {
+            matches!(item, Item::Group { path, profile, .. }
+                if path == "work" && profile.as_deref() == Some("alpha"))
+        })
+        .expect("alpha's work header");
+    view.update_selected();
+    view.group_rename_context = Some(crate::tui::home::GroupRenameContext {
+        old_path: "work".to_string(),
+        old_profile: "alpha".to_string(),
+    });
+
+    view.rename_selected_group(None, Some("beta")).unwrap();
+
+    assert_eq!(view.selected_session, None);
+    assert_eq!(view.selected_group.as_deref(), Some("work"));
+    assert_eq!(view.selected_group_profile.as_deref(), Some("beta"));
+}
+
+/// A menu opened on an empty sidebar has no row to lose, so a reload leaves it open, also when
+/// the selection still names the session just deleted.
+#[test]
+#[serial]
+fn a_menu_on_an_empty_sidebar_survives_a_reload() {
+    let mut env = seeded_env(test_home(), &[], true);
+    assert!(env.view.flat_items.is_empty());
+    env.view.context_menu = Some(crate::tui::dialogs::ContextMenuDialog::for_empty_sidebar((
+        1, 1,
+    )));
+
+    env.view.reload().unwrap();
+    assert!(env.view.context_menu.is_some());
+
+    env.view.selected_session = Some("deleted-session".to_string());
+    env.view.rebuild_flat_items_keeping_cursor();
+    assert!(env.view.context_menu.is_some());
 }

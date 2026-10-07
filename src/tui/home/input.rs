@@ -4219,8 +4219,8 @@ impl HomeView {
                     }
                 }
             }
-            if let Some(header) = self.header_row_for_hidden_session(&sid) {
-                self.cursor = header;
+            if let Some(row) = self.row_for_hidden_session(&sid) {
+                self.cursor = row;
                 self.update_selected();
                 self.context_menu = None;
                 return;
@@ -6133,7 +6133,7 @@ impl HomeView {
             self.selected_group,
             self.selected_group_profile,
         ) = selection;
-        self.flash_status("Live send ended: its session is hidden (y to show)");
+        self.flash_status("Live send ended: its session is hidden (y cycles to show)");
     }
 
     /// Tear down live-send state and restore the tmux window's automatic sizing:

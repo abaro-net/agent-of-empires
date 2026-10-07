@@ -21,6 +21,42 @@ fn shown_in_groups(pool: Vec<Instance>, hide_stopped: bool) -> Vec<Instance> {
         .collect()
 }
 
+/// `items` without the group headers that show no session although their groups hold some
+/// (`totals`), and without anything nested under such a header. A group with no sessions at
+/// all keeps its header.
+fn without_emptied_groups(
+    items: Vec<Item>,
+    totals: &HashMap<(String, Option<String>), usize>,
+) -> Vec<Item> {
+    let mut hidden_below: Option<usize> = None;
+    items
+        .into_iter()
+        .filter(|item| {
+            if hidden_below.is_some_and(|depth| item.depth() > depth) {
+                return false;
+            }
+            hidden_below = None;
+            let Item::Group {
+                path,
+                profile,
+                session_count: 0,
+                depth,
+                ..
+            } = item
+            else {
+                return true;
+            };
+            let emptied = totals
+                .get(&(path.clone(), profile.clone()))
+                .is_some_and(|total| *total > 0);
+            if emptied {
+                hidden_below = Some(*depth);
+            }
+            !emptied
+        })
+        .collect()
+}
+
 /// Project-mode group key: the repo label, or the `SCRATCH_GROUP_PATH`
 /// sentinel so a real repo named `scratch` keeps its own identity.
 pub(super) fn project_group_key(inst: &Instance) -> String {
@@ -147,39 +183,58 @@ impl HomeView {
     }
 
     pub(in crate::tui) fn build_flat_items(&self) -> Vec<Item> {
-        self.build_flat_items_hiding(self.hide_stopped_in_groups)
+        let items = self.build_flat_items_hiding(self.stopped_filter != StoppedFilter::Off);
+        match self.stopped_filter {
+            StoppedFilter::SessionsAndGroups => {
+                without_emptied_groups(items, &self.full_group_counts())
+            }
+            StoppedFilter::Off | StoppedFilter::Sessions => items,
+        }
+    }
+
+    /// Each group header's count with nothing hidden, keyed by path and profile.
+    fn full_group_counts(&self) -> HashMap<(String, Option<String>), usize> {
+        self.build_flat_items_hiding(false)
+            .into_iter()
+            .filter_map(|item| match item {
+                Item::Group {
+                    path,
+                    profile,
+                    session_count,
+                    ..
+                } => Some(((path, profile), session_count)),
+                Item::Session { .. } => None,
+            })
+            .collect()
     }
 
     /// Rebuild the rows and, while stopped sessions are hidden, every group header's full count.
     pub(super) fn refresh_flat_items(&mut self) {
         self.flat_items = self.build_flat_items();
-        self.group_totals = if self.hide_stopped_in_groups {
-            self.build_flat_items_hiding(false)
-                .into_iter()
-                .filter_map(|item| match item {
-                    Item::Group {
-                        path,
-                        profile,
-                        session_count,
-                        ..
-                    } => Some(((path, profile), session_count)),
-                    Item::Session { .. } => None,
-                })
-                .collect()
-        } else {
+        self.group_totals = if self.stopped_filter == StoppedFilter::Off {
             HashMap::new()
+        } else {
+            self.full_group_counts()
         };
         self.end_live_send_if_hidden();
     }
 
     pub(super) fn toggle_hide_stopped_in_groups(&mut self) {
-        self.hide_stopped_in_groups = !self.hide_stopped_in_groups;
+        self.stopped_filter = match self.stopped_filter {
+            StoppedFilter::Off => StoppedFilter::Sessions,
+            StoppedFilter::Sessions => StoppedFilter::SessionsAndGroups,
+            StoppedFilter::SessionsAndGroups => StoppedFilter::Off,
+        };
         self.rebuild_flat_items_keeping_cursor();
         self.update_selected();
-        self.flash_status(if self.hide_stopped_in_groups {
-            "Stopped sessions in groups hidden (y to show)"
-        } else {
-            "Showing stopped sessions"
+        self.flash_status(match self.stopped_filter {
+            StoppedFilter::Off => "Showing stopped sessions and all groups",
+            StoppedFilter::Sessions => {
+                "Stopped sessions in groups hidden (y: hide emptied groups too)"
+            }
+            StoppedFilter::SessionsAndGroups => {
+                "Groups with nothing shown hidden too (y: show all)"
+            }
         });
     }
 
@@ -189,14 +244,14 @@ impl HomeView {
         let hideable = self
             .get_instance(id)
             .is_some_and(|inst| self.could_hide(inst));
-        if self.hide_stopped_in_groups && hideable {
+        if self.stopped_filter != StoppedFilter::Off && hideable {
             self.rebuild_flat_items_keeping_cursor();
         }
     }
 
     /// Whether the `y` filter is keeping `inst` out of the list.
     pub(super) fn hidden_by_filter(&self, inst: &Instance) -> bool {
-        self.hide_stopped_in_groups
+        self.stopped_filter != StoppedFilter::Off
             && inst.status == crate::session::Status::Stopped
             && self.could_hide(inst)
     }
@@ -212,11 +267,10 @@ impl HomeView {
         grouped && !inst.is_archived() && !inst.is_trashed()
     }
 
-    /// The row of the group header session `id` sits under while the `y` filter hides it, so a
-    /// selection that drops out moves to its own group rather than to whichever row now has its
-    /// index. Read from the unfiltered rows of the current grouping, where a session follows its
-    /// own group's header.
-    pub(super) fn header_row_for_hidden_session(&self, id: &str) -> Option<usize> {
+    /// The row a selection on session `id` moves to while the `y` filter hides it, so it lands
+    /// on its own group rather than on whichever row now has its index. See
+    /// [`Self::nearest_shown_row`].
+    pub(super) fn row_for_hidden_session(&self, id: &str) -> Option<usize> {
         if !self
             .get_instance(id)
             .is_some_and(|inst| self.hidden_by_filter(inst))
@@ -227,13 +281,71 @@ impl HomeView {
         let at = unfiltered
             .iter()
             .position(|item| matches!(item, Item::Session { id: sid, .. } if sid == id))?;
-        let (path, profile) = unfiltered[..at].iter().rev().find_map(|item| match item {
-            Item::Group { path, profile, .. } => Some((path, profile)),
-            Item::Session { .. } => None,
-        })?;
-        self.flat_items.iter().position(|item| {
-            matches!(item, Item::Group { path: p, profile: pr, .. } if p == path && pr == profile)
-        })
+        self.nearest_shown_row(&unfiltered, at)
+    }
+
+    /// The row a selection on group `path` of `profile` moves to while the `y` filter hides
+    /// its header. See [`Self::nearest_shown_row`].
+    pub(super) fn row_for_hidden_group(&self, path: &str, profile: Option<&str>) -> Option<usize> {
+        if self.stopped_filter != StoppedFilter::SessionsAndGroups {
+            return None;
+        }
+        let unfiltered = self.build_flat_items_hiding(false);
+        let header = |profile: Option<&str>| {
+            unfiltered.iter().position(|item| {
+                matches!(item, Item::Group { path: p, profile: pr, .. }
+                    if p == path && pr.as_deref() == profile)
+            })
+        };
+        // A single-profile header has no profile of its own, but the selection names one.
+        let at = header(profile).or_else(|| header(None))?;
+        self.nearest_shown_row(&unfiltered, at)
+    }
+
+    /// For the row at `at` of the unfiltered rows `unfiltered`, the shown row nearest to it: its
+    /// closest enclosing group still shown, else the first shown group header after it, else the
+    /// last one before it. Only when no group header is shown, the next shown row (the Archived
+    /// and Trash headers included), else the previous one.
+    fn nearest_shown_row(&self, unfiltered: &[Item], at: usize) -> Option<usize> {
+        let row = |item: &Item| {
+            self.flat_items.iter().position(|row| match (item, row) {
+                (
+                    Item::Group { path, profile, .. },
+                    Item::Group {
+                        path: p,
+                        profile: pr,
+                        ..
+                    },
+                ) => p == path && pr == profile,
+                (Item::Session { id, .. }, Item::Session { id: sid, .. }) => sid == id,
+                _ => false,
+            })
+        };
+        let header = |item: &Item| match item {
+            Item::Group { path, .. }
+                if !crate::session::is_within_archived_section(path)
+                    && !crate::session::is_within_trash_section(path) =>
+            {
+                row(item)
+            }
+            _ => None,
+        };
+        let mut depth = unfiltered[at].depth() + 1;
+        let enclosing = unfiltered[..=at].iter().rev().filter(|item| {
+            let encloses = matches!(item, Item::Group { .. }) && item.depth() < depth;
+            if encloses {
+                depth = item.depth();
+            }
+            encloses
+        });
+        let (before, after) = (&unfiltered[..at], &unfiltered[at + 1..]);
+        enclosing
+            .filter_map(header)
+            .next()
+            .or_else(|| after.iter().find_map(header))
+            .or_else(|| before.iter().rev().find_map(header))
+            .or_else(|| after.iter().find_map(row))
+            .or_else(|| before.iter().rev().find_map(row))
     }
 
     fn build_flat_items_hiding(&self, hide_stopped: bool) -> Vec<Item> {
