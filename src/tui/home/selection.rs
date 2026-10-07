@@ -9,12 +9,12 @@ impl HomeView {
             .position(|item| matches!(item, Item::Session { id, .. } if id == session_id))
     }
 
-    /// Select `session_id`'s row, or its group header while the `y` filter hides it, so the
-    /// selection never names a session the list does not show.
+    /// Select `session_id`'s row, or the shown row nearest it while the `y` filter hides it, so
+    /// the selection never names a session the list does not show.
     pub fn select_session_by_id(&mut self, session_id: &str) {
         if let Some(idx) = self
             .session_row(session_id)
-            .or_else(|| self.header_row_for_hidden_session(session_id))
+            .or_else(|| self.row_for_hidden_session(session_id))
         {
             self.cursor = idx;
             self.update_selected();
@@ -38,21 +38,49 @@ impl HomeView {
                             if path == gpath && *profile == selected_profile)
                     })
                     .or_else(|| {
-                        self.flat_items.iter().position(
-                            |item| matches!(item, Item::Group { path, .. } if path == gpath),
-                        )
+                        // A single-profile header carries no profile of its own.
+                        self.flat_items.iter().position(|item| {
+                            matches!(item, Item::Group { path, profile: None, .. }
+                                if path == gpath)
+                        })
                     })
             }
             (None, None) => None,
         };
         let hidden_header = restored
             .is_none()
-            .then(|| self.selected_session.clone())
-            .flatten()
-            .and_then(|sid| self.header_row_for_hidden_session(&sid));
+            .then(|| match (&self.selected_session, &self.selected_group) {
+                (Some(sid), _) => self.row_for_hidden_session(sid),
+                (None, Some(gpath)) => {
+                    self.row_for_hidden_group(gpath, self.selected_group_profile.as_deref())
+                }
+                (None, None) => None,
+            })
+            .flatten();
         if let Some(header) = hidden_header {
             self.cursor = header;
             self.update_selected();
+            self.context_menu = None;
+            return;
+        }
+        // A group moved into another profile that already holds its path is found by path
+        // alone, once the filter is known not to hide it.
+        let restored = restored.or_else(|| {
+            let gpath = self.selected_group.as_ref()?;
+            self.flat_items
+                .iter()
+                .position(|item| matches!(item, Item::Group { path, .. } if path == gpath))
+        });
+        let selected = self
+            .selected_session
+            .as_ref()
+            .is_some_and(|id| self.instances.contains_key(id))
+            || self.selected_group.is_some();
+        if restored.is_none() && selected && self.flat_items.is_empty() {
+            self.cursor = 0;
+            self.selected_session = None;
+            self.selected_group = None;
+            self.selected_group_profile = None;
             self.context_menu = None;
             return;
         }

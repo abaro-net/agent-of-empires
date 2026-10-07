@@ -90,6 +90,16 @@ pub(super) struct DeleteAttempt {
     pub(super) trashed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// What `y` hides; each press moves to the next state and the last wraps to `Off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StoppedFilter {
+    Off,
+    /// Stopped sessions inside groups.
+    Sessions,
+    /// Those, and the group headers left with no session shown.
+    SessionsAndGroups,
+}
+
 pub(super) struct GroupRenameContext {
     pub(super) old_path: String,
     pub(super) old_profile: String,
@@ -396,8 +406,8 @@ pub struct HomeView {
 
     pub(super) archived_section_collapsed: bool,
 
-    /// Stopped sessions inside groups are left out of the sidebar, for this run only.
-    pub(super) hide_stopped_in_groups: bool,
+    /// What `y` leaves out of the sidebar, for this run only.
+    pub(super) stopped_filter: StoppedFilter,
     /// While stopped sessions are hidden, each group header's full count, keyed by path and
     /// profile, so the header can show `visible/total`.
     pub(super) group_totals: HashMap<(String, Option<String>), usize>,
