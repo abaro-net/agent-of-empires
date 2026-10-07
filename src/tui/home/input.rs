@@ -2870,6 +2870,7 @@ impl HomeView {
             }
             ActionId::ToggleContainer => self.toggle_container_for_selected(),
             ActionId::TogglePreviewInfo => self.toggle_preview_info(),
+            ActionId::ToggleHideStopped => self.toggle_hide_stopped_in_groups(),
             ActionId::ToggleDiagnostics => self.toggle_diagnostics(),
             ActionId::OpenSystemHealth => self.open_system_health(),
             ActionId::SortPicker => self.show_sort_picker(),
@@ -3972,6 +3973,7 @@ impl HomeView {
                 if visible_sessions.contains(&inst.id)
                     || current_session.as_deref() == Some(inst.id.as_str())
                     || inst.is_dismissed()
+                    || self.hidden_by_filter(inst)
                 {
                     return false;
                 }
@@ -4217,6 +4219,12 @@ impl HomeView {
                     }
                 }
             }
+            if let Some(header) = self.header_row_for_hidden_session(&sid) {
+                self.cursor = header;
+                self.update_selected();
+                self.context_menu = None;
+                return;
+            }
         }
         if self.flat_items.is_empty() {
             self.cursor = 0;
@@ -4232,7 +4240,7 @@ impl HomeView {
     pub(super) fn apply_sort_order(&mut self, new_order: SortOrder) {
         self.sort_order = new_order;
         if self.search_active && !self.search_query.value().is_empty() {
-            self.flat_items = self.build_flat_items();
+            self.refresh_flat_items();
             self.update_search();
         } else {
             self.rebuild_flat_items();
@@ -4246,7 +4254,7 @@ impl HomeView {
         }
     }
 
-    fn apply_group_by(&mut self, new_mode: GroupByMode) {
+    pub(super) fn apply_group_by(&mut self, new_mode: GroupByMode) {
         self.group_by = new_mode;
         self.rebuild_flat_items();
         self.reseat_cursor_after_rebuild();
@@ -6098,6 +6106,36 @@ impl HomeView {
         }
     }
 
+    /// End live-send when a rebuild has left its target hidden by the `y` filter, whatever
+    /// changed (its status, the sort, the grouping, its group): a stopped session's terminal
+    /// can outlive its agent, and keys must not reach a pane the list no longer shows. The
+    /// selection is left for the caller's rebuild to settle.
+    pub(super) fn end_live_send_if_hidden(&mut self) {
+        let Some(state) = self.live_send.clone() else {
+            return;
+        };
+        if !self
+            .get_instance(&state.session_id)
+            .is_some_and(|inst| self.hidden_by_filter(inst))
+        {
+            return;
+        }
+        let selection = (
+            self.cursor,
+            self.selected_session.clone(),
+            self.selected_group.clone(),
+            self.selected_group_profile.clone(),
+        );
+        self.exit_live_send_and_restore_sizing(&state);
+        (
+            self.cursor,
+            self.selected_session,
+            self.selected_group,
+            self.selected_group_profile,
+        ) = selection;
+        self.flash_status("Live send ended: its session is hidden (y to show)");
+    }
+
     /// Tear down live-send state and restore the tmux window's automatic sizing:
     /// live-send's resize loop forces manual sizing, which would leave the next attach
     /// from a full-size terminal cramped at the preview dimensions. Re-setting
@@ -6422,7 +6460,7 @@ impl HomeView {
     /// `search_matches` keeps stale indices, and `n`/`N` jumps to the wrong sessions
     /// (#2676).
     pub(super) fn rebuild_flat_items(&mut self) {
-        self.flat_items = self.build_flat_items();
+        self.refresh_flat_items();
         if !self.search_matches.is_empty() {
             self.refresh_search_matches();
         }
