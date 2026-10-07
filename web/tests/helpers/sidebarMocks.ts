@@ -52,6 +52,8 @@ export interface SidebarMockHandle {
   /** One-shot override for the next PUT's response. */
   nextPutResponse: { status?: number; body?: string } | null;
   readOnly: boolean;
+  /** Merges `fields` into session `id` for every later GET, as a server-side change seen by the next poll. */
+  patchSession: (id: string, fields: Record<string, unknown>) => void;
 }
 
 export interface SidebarMockOptions {
@@ -69,6 +71,10 @@ export async function installSidebarMocks(page: Page, opts: SidebarMockOptions):
     puts: [],
     nextPutResponse: null,
     readOnly: !!opts.readOnly,
+    patchSession: (id, fields) => {
+      const s = filled.find((f) => f.id === id);
+      if (s) s.fields = { ...s.fields, ...fields };
+    },
   };
 
   let ordering = opts.ordering ?? filled.map((s) => workspaceId(s));

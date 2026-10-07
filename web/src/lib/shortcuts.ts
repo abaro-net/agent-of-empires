@@ -5,6 +5,7 @@ export const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/
 export interface ShortcutActions {
   onNew: () => void;
   onJumpToAttention: () => void;
+  onCycleHideStopped: () => void;
   /** Opens the wizard on the Review step for a scratch session. */
   onNewScratch: () => void;
   onDiff: () => void;
@@ -25,6 +26,7 @@ export type ShortcutId =
   | "new"
   | "newScratch"
   | "jumpAttention"
+  | "hideStopped"
   | "diff"
   | "settings"
   | "escape"
@@ -161,6 +163,18 @@ export const SHORTCUTS: readonly ShortcutDef[] = [
     trigger: {
       scope: "textless",
       key: "a",
+      preventDefault: true,
+      stopPropagation: false,
+    },
+  },
+  {
+    id: "hideStopped",
+    action: "onCycleHideStopped",
+    description: "Hide stopped sessions in groups, then their emptied groups, then show all",
+    chord: { base: "y" },
+    trigger: {
+      scope: "textless",
+      key: "y",
       preventDefault: true,
       stopPropagation: false,
     },

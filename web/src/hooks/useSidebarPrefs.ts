@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { loadSidebarAxis, saveSidebarAxis, type SidebarAxis } from "../lib/sidebarAxis";
+import { loadSidebarHideStopped, saveSidebarHideStopped, type SidebarHideStopped } from "../lib/sidebarHideStopped";
 import { loadSidebarSortMode, saveSidebarSortMode, type SidebarSortMode } from "../lib/sidebarSort";
 
 function usePersistedChoice<T>(load: () => T, save: (next: T) => void): readonly [T, (next: T) => void] {
@@ -20,4 +21,8 @@ export function useSidebarAxis(): readonly [SidebarAxis, (axis: SidebarAxis) => 
 
 export function useSidebarSortMode(): readonly [SidebarSortMode, (mode: SidebarSortMode) => void] {
   return usePersistedChoice(loadSidebarSortMode, saveSidebarSortMode);
+}
+
+export function useSidebarHideStopped(): readonly [SidebarHideStopped, (mode: SidebarHideStopped) => void] {
+  return usePersistedChoice(loadSidebarHideStopped, saveSidebarHideStopped);
 }

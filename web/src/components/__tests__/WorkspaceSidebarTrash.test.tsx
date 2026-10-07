@@ -4,8 +4,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { WorkspaceSidebar } from "../WorkspaceSidebar";
-import { buildSessionGroups } from "../../lib/sidebarGroups";
-import type { SessionResponse, Workspace } from "../../lib/types";
+import {
+  buildNestedSidebarGroups,
+  buildOrgGroups,
+  buildSessionGroups,
+  repoGroupToSidebarGroup,
+} from "../../lib/sidebarGroups";
+import type { RepoGroup, SessionResponse, Workspace } from "../../lib/types";
 import { makeSession, makeWorkspace } from "./fixtures";
 
 type Props = React.ComponentProps<typeof WorkspaceSidebar>;
@@ -61,10 +66,12 @@ function renderSidebar(workspaces: Workspace[], over: Partial<Props> = {}) {
     onPluginSortChange: noop,
     axis: "group",
     onAxisChange: noop,
+    hideStopped: "off",
+    onCycleHideStopped: noop,
     ...over,
   };
-  render(<WorkspaceSidebar {...props} />);
-  return props;
+  const view = render(<WorkspaceSidebar {...props} />);
+  return { ...props, rerender: (next: Partial<Props>) => view.rerender(<WorkspaceSidebar {...props} {...next} />) };
 }
 const withTrash = (over: Partial<Props> = {}) => {
   const ws = trashed("trashed-ws", "s1");
@@ -261,5 +268,103 @@ describe("WorkspaceSidebar row actions on a group slice (#4019)", () => {
     fireEvent.contextMenu(screen.getByTestId("sidebar-session-row"));
     expect(query("sidebar-context-menu-start")).toBeNull();
     expect(screen.getByTestId("sidebar-context-menu-archive").textContent).toBe("Unarchive");
+  });
+});
+
+describe("WorkspaceSidebar hiding stopped sessions in groups", () => {
+  const repo = {
+    id: "/repo-a",
+    repoPath: "/repo-a",
+    displayName: "repo-a",
+    defaultDisplayName: "repo-a",
+    alias: null,
+    color: null,
+    remoteOwner: null,
+    remoteOwnerKey: null,
+    workspaces: [
+      workspace("run-ws", [{ id: "r1", title: "run-ws", status: "Idle" }]),
+      workspace("stop-ws", [{ id: "x1", title: "stop-ws" }]),
+    ],
+    status: "idle",
+    collapsed: false,
+    registeredProjects: [],
+  } as unknown as RepoGroup;
+  const onRepoAxis = (over: Partial<Props> = {}) =>
+    renderSidebar([], { groups: [repoGroupToSidebarGroup(repo)], axis: "repo", sortMode: "manual", ...over });
+  const row = (id: string) =>
+    screen.queryAllByTestId("sidebar-session-row").find((r) => r.textContent?.includes(id)) ?? null;
+  const draggable = (id: string) => row(id)?.closest("[aria-roledescription]") != null;
+
+  it("cycles from the toolbar toggle, which shows the current mode", () => {
+    const onCycleHideStopped = vi.fn();
+    const { rerender } = onRepoAxis({ onCycleHideStopped });
+    const toggle = screen.getByTestId("sidebar-hide-stopped-toggle");
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    click("sidebar-hide-stopped-toggle");
+    expect(onCycleHideStopped).toHaveBeenCalledTimes(1);
+    rerender({ hideStopped: "groups" });
+    expect(toggle.getAttribute("data-mode")).toBe("groups");
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("turns drag reorder off and drops hidden rows from the selection", () => {
+    const { rerender } = onRepoAxis();
+    expect([draggable("run-ws"), draggable("stop-ws")]).toEqual([true, true]);
+    fireEvent.click(row("stop-ws")!, { ctrlKey: true });
+    expect(row("stop-ws")!.hasAttribute("data-selected")).toBe(true);
+
+    rerender({ hideStopped: "rows" });
+    expect(row("stop-ws")).toBeNull();
+    expect(draggable("run-ws")).toBe(false);
+
+    rerender({ hideStopped: "off" });
+    expect(draggable("run-ws")).toBe(true);
+    expect(row("stop-ws")!.hasAttribute("data-selected")).toBe(false);
+  });
+
+  it("keeps an emptied subgroup's header on repo+group and marks a collapsed repo holding the open hidden row", () => {
+    const oldStopped = workspace("stop-ws", [{ id: "x1", title: "stop-ws", group_path: "old" }]);
+    const nested = (collapsed: boolean) =>
+      buildNestedSidebarGroups([{ ...repo, workspaces: [repo.workspaces[0]!, oldStopped], collapsed }], {
+        idleDecayWindowMs: 60_000,
+        sortMode: "manual",
+        isSubgroupCollapsed: () => false,
+      });
+    const headers = () => screen.getAllByTestId("sidebar-group-header");
+    const marked = () => headers().map((h) => h.className.includes("border-session-active"));
+    const { rerender } = renderSidebar([], {
+      nestedGroups: nested(false),
+      axis: "repo+group",
+      hideStopped: "rows",
+      activeId: "stop-ws",
+    });
+    expect(row("stop-ws")).toBeNull();
+    expect(headers().map((h) => h.querySelector("[data-testid='sidebar-group-session-count']")?.textContent)).toEqual([
+      "(1/2)",
+      "(0/1)",
+      "(1)",
+    ]);
+    expect(marked()).toEqual([false, true, false]);
+
+    rerender({ nestedGroups: nested(true) });
+    expect(marked()).toEqual([true]);
+  });
+
+  it("on the org axis, an expanded org leaves the mark to the repo holding the open hidden row", () => {
+    const orgs = (collapsed: boolean) =>
+      buildOrgGroups([repo], { isOrgCollapsed: () => collapsed, isRepoCollapsed: () => false });
+    const marked = () =>
+      screen.getAllByTestId("sidebar-group-header").map((h) => h.className.includes("border-session-active"));
+    const { rerender } = renderSidebar([], {
+      orgGroups: orgs(false),
+      axis: "org",
+      hideStopped: "rows",
+      activeId: "stop-ws",
+    });
+    expect(row("stop-ws")).toBeNull();
+    expect(marked()).toEqual([false, true]);
+
+    rerender({ orgGroups: orgs(true) });
+    expect(marked()).toEqual([true]);
   });
 });

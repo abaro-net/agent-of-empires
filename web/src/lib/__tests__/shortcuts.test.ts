@@ -71,6 +71,8 @@ describe("matchShortcut", () => {
     ["Escape in an input", ev({ key: "Escape" }), true, true, "escape"],
     ["Meta+Escape", ev({ key: "Escape", metaKey: true }), true, false, "escape"],
     ["N", ev({ key: "N" }), true, false, null],
+    ["y", ev({ key: "y" }), false, false, "hideStopped"],
+    ["y in an input", ev({ key: "y" }), false, true, null],
     ["n in an input", ev({ key: "n" }), true, true, null],
     ["Ctrl+n", ev({ key: "n", ctrlKey: true }), true, false, null],
     ["Alt+n", ev({ key: "n", altKey: true }), true, false, null],

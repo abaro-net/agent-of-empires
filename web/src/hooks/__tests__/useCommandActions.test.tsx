@@ -30,6 +30,8 @@ function baseArgs(overrides: Partial<Args> = {}): Args {
     onOpenAbout: vi.fn(),
     onGoDashboard: vi.fn(),
     onToggleSidebar: vi.fn(),
+    hideStopped: "off",
+    onCycleHideStopped: vi.fn(),
     onLogout: vi.fn(),
     ...overrides,
   };
@@ -62,6 +64,14 @@ describe("useCommandActions creation and attention commands", () => {
     expect(jump).toMatchObject({ title: "Go to next attention session", group: "Actions", shortcut: "a" });
     jump.perform();
     expect(onJumpToAttention).toHaveBeenCalledTimes(1);
+  });
+
+  it("cycles stopped-session hiding, naming the current state", () => {
+    const onCycleHideStopped = vi.fn();
+    const cycle = find(actionsFor({ hideStopped: "rows", onCycleHideStopped }), "action:cycle-hide-stopped")!;
+    expect(cycle).toMatchObject({ subtitle: "Stopped sessions hidden in groups", shortcut: "y" });
+    cycle.perform();
+    expect(onCycleHideStopped).toHaveBeenCalledTimes(1);
   });
 });
 

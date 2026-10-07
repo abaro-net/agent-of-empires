@@ -4,6 +4,7 @@ const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(n
 import type { SessionResponse } from "../lib/types";
 import type { ConversationSearchHit } from "../lib/api";
 import type { CommandAction } from "../components/command-palette/types";
+import { HIDE_STOPPED_LABEL, type SidebarHideStopped } from "../lib/sidebarHideStopped";
 
 export type ConversationActionData = Omit<CommandAction, "perform"> & { sessionId: string };
 
@@ -67,6 +68,8 @@ interface Args {
   onOpenAbout: () => void;
   onGoDashboard: () => void;
   onToggleSidebar: () => void;
+  hideStopped: SidebarHideStopped;
+  onCycleHideStopped: () => void;
   onLogout: () => void;
 }
 
@@ -89,6 +92,8 @@ export function useCommandActions({
   onOpenAbout,
   onGoDashboard,
   onToggleSidebar,
+  hideStopped,
+  onCycleHideStopped,
   onLogout,
 }: Args): CommandAction[] {
   return useMemo(() => {
@@ -183,6 +188,16 @@ export function useCommandActions({
     });
 
     actions.push({
+      id: "action:cycle-hide-stopped",
+      title: "Cycle hiding stopped sessions in groups",
+      subtitle: HIDE_STOPPED_LABEL[hideStopped],
+      group: "Actions",
+      keywords: ["hide", "show", "stopped", "filter", "groups", "sidebar"],
+      shortcut: "y",
+      perform: onCycleHideStopped,
+    });
+
+    actions.push({
       id: "action:help",
       title: "Show help",
       group: "Actions",
@@ -254,6 +269,8 @@ export function useCommandActions({
     onOpenAbout,
     onGoDashboard,
     onToggleSidebar,
+    hideStopped,
+    onCycleHideStopped,
     onLogout,
   ]);
 }

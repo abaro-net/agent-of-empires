@@ -1362,6 +1362,17 @@
       ]
     },
     {
+      "id": "sidebar.hide-stopped",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/sidebar-hide-stopped.spec.ts"],
+      "components": [
+        "web/src/components/sidebar/SidebarToolbar.tsx",
+        "web/src/components/sidebar/GroupLists.tsx",
+        "web/src/components/sidebar/SidebarGroupHeader.tsx"
+      ]
+    },
+    {
       "id": "sidebar.compact-mode",
       "kind": "mocked-playwright",
       "risk": "medium",

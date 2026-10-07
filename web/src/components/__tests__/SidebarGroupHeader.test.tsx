@@ -80,8 +80,14 @@ describe("SidebarGroupHeader", () => {
       views(workspace("live", idle(1)), workspace("arch", idle(1), "archived"), workspace("zz", idle(1), "snoozed")),
       "(1)",
     ],
-  ])("counts %s as %s", (_n, workspaces, count) => {
-    renderHeader({ group: group({ workspaces }) });
+    [
+      "one shown while two stopped are hidden",
+      views(workspace("live", idle(1)), workspace("arch", idle(1), "archived")),
+      "(1/3)",
+      { ids: ["s1", "s2"], keepHeader: true },
+    ],
+  ])("counts %s as %s", (_n, workspaces, count, hidden?: SidebarGroup["hidden"]) => {
+    renderHeader({ group: group({ workspaces, hidden }) });
     expect(text("sidebar-group-session-count")).toBe(count);
   });
 

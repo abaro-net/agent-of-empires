@@ -1,6 +1,8 @@
 import type { Workspace } from "../../lib/types";
+import type { SidebarHideStopped } from "../../lib/sidebarHideStopped";
 import {
   sidebarGroupHasLiveWorkspace,
+  UNGROUPED_GROUP_ID,
   type NestedSidebarGroup,
   type OrgNestedGroup,
   type SidebarGroup,
@@ -48,6 +50,46 @@ export function filterOrg(groups: OrgNestedGroup[], keep: RowFilter): OrgNestedG
   return groups
     .map((og) => ({ org: og.org, repos: filterLevel(og.repos, keep, og.org.displayName) }))
     .filter((og) => og.repos.length > 0);
+}
+
+const rowIsStopped = (v: SidebarWorkspaceView) =>
+  v.workspace.sessions.length > 0 &&
+  !workspaceIsSunk(v.workspace) &&
+  v.workspace.sessions.every((s) => s.status === "Stopped");
+
+/** Drops `group`'s stopped rows; the header stays in `rows` mode, when pinned, or while it holds the open workspace. */
+function hideStoppedLevel<G extends SidebarGroup>(group: G, mode: SidebarHideStopped, activeId: string | null): G {
+  const ids = group.workspaces.filter(rowIsStopped).map((v) => v.workspace.id);
+  if (ids.length === 0) return group;
+  return {
+    ...group,
+    workspaces: group.workspaces.filter((v) => !rowIsStopped(v)),
+    hidden: { ids, keepHeader: mode === "rows" || group.pinned || (activeId != null && ids.includes(activeId)) },
+  };
+}
+
+/** The flat group axis keeps its Ungrouped rows; every other group, on every axis, hides its stopped rows. */
+export function hideStoppedFlat(groups: SidebarGroup[], mode: SidebarHideStopped, activeId: string | null) {
+  if (mode === "off") return groups;
+  return groups.map((g) =>
+    g.kind === "sessionGroup" && g.id === UNGROUPED_GROUP_ID ? g : hideStoppedLevel(g, mode, activeId),
+  );
+}
+
+export function hideStoppedNested(groups: NestedSidebarGroup[], mode: SidebarHideStopped, activeId: string | null) {
+  if (mode === "off") return groups;
+  return groups.map((ng) => ({
+    repo: hideStoppedLevel(ng.repo, mode, activeId),
+    subgroups: ng.subgroups.map((sg) => hideStoppedLevel(sg, mode, activeId)),
+  }));
+}
+
+export function hideStoppedOrg(groups: OrgNestedGroup[], mode: SidebarHideStopped, activeId: string | null) {
+  if (mode === "off") return groups;
+  return groups.map((og) => ({
+    org: hideStoppedLevel(og.org, mode, activeId),
+    repos: og.repos.map((r) => hideStoppedLevel(r, mode, activeId)),
+  }));
 }
 
 export const sunkViews = (groups: SidebarGroup[]) =>

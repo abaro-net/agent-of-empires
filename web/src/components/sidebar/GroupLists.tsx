@@ -5,7 +5,6 @@ import type { RepoAppearanceUpdate } from "../../lib/repoAppearance";
 import {
   nestedSidebarGroupShouldRender,
   orgNestedGroupShouldRender,
-  sidebarGroupHasLiveWorkspace,
   sidebarGroupShouldRender,
   type NestedSidebarGroup,
   type OrgNestedGroup,
@@ -39,12 +38,13 @@ export interface ListContext {
 const liveViews = (group: SidebarGroup) => group.workspaces.filter((v) => !workspaceIsSunk(v.workspace));
 const containsActive = (views: SidebarWorkspaceView[], id: string | null) => views.some((v) => v.workspace.id === id);
 
-/** Header for any group level. `full` is the unfiltered group so "Archive all" covers hidden members. */
+/** Header for any group level. `full` is the unfiltered group so "Archive all" covers filtered-out members. */
 function GroupHeader({
   ctx,
   full,
   visible,
   onToggle,
+  nests = false,
   pinnable = false,
   createsInRepo = false,
   dragHandle,
@@ -53,16 +53,21 @@ function GroupHeader({
   full: SidebarGroup;
   visible: SidebarWorkspaceView[];
   onToggle: () => void;
+  /** Holds group headers rather than rows, so an expanded one leaves marking to them. */
+  nests?: boolean;
   pinnable?: boolean;
   createsInRepo?: boolean;
   dragHandle?: DragHandleProps;
 }) {
   const expanded = ctx.hasFilter || !full.collapsed;
   const locked = ctx.readOnly || ctx.offline;
+  const activeHidden = ctx.displayedActiveId != null && !!full.hidden?.ids.includes(ctx.displayedActiveId);
   return (
     <SidebarGroupHeader
       group={{ ...full, collapsed: !expanded }}
-      hasActiveChild={!expanded && containsActive(visible, ctx.displayedActiveId)}
+      hasActiveChild={
+        expanded ? !nests && activeHidden : activeHidden || containsActive(visible, ctx.displayedActiveId)
+      }
       onClick={() => !ctx.hasFilter && onToggle()}
       onUpdateAppearance={ctx.onUpdateAppearance}
       onArchiveAll={locked ? undefined : () => ctx.onArchiveGroup(full)}
@@ -210,11 +215,12 @@ export function NestedGroupList({
         full={repo}
         visible={subgroups.flatMap((sg) => sg.workspaces)}
         onToggle={() => onToggleGroup(repo.id)}
+        nests
         pinnable
         createsInRepo
       />
       {(ctx.hasFilter || !repo.collapsed) &&
-        subgroups.filter(sidebarGroupHasLiveWorkspace).map((sg) => {
+        subgroups.filter(sidebarGroupShouldRender).map((sg) => {
           const groupPath = sg.groupPath ?? "";
           const full =
             fullGroups.find((n) => n.repo.id === repo.id)?.subgroups.find((s) => (s.groupPath ?? "") === groupPath) ??
@@ -259,6 +265,7 @@ export function OrgGroupList({
         full={org}
         visible={repos.flatMap((r) => r.workspaces)}
         onToggle={() => onToggleOrg(org.id)}
+        nests
       />
       {(ctx.hasFilter || !org.collapsed) &&
         repos.filter(sidebarGroupShouldRender).map((repo) => {

@@ -8,6 +8,7 @@ const EXACT_KEYS = new Set<string>([
   "aoe.acp.toolDensity.v1", // compact/detailed tool display
   "aoe-sidebar-sort-mode",
   "aoe-sidebar-axis",
+  "aoe-sidebar-hide-stopped",
   "aoe-sidebar-sunk-expanded",
   "aoe-repo-appearance-v1", // repo colors/aliases
   "aoe-repo-group-order-v1", // manual repo-group order

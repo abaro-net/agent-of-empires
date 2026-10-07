@@ -46,6 +46,8 @@ The sort picker offers three modes, and drag is available only in the first:
 
 A grouping toggle next to it cycles **By repo** (default), **By group** (the group set in the TUI rename dialog, with `aoe group move`, or from the row's **Edit group** menu; ungrouped sessions sit in a bucket at the bottom), and **By repo and group** (repo headers with groups nested inside). Group paths use `/` for hierarchy. Collapse state is tracked per axis, and the sort and grouping choices are per-browser. The Multi-repo and Scratch groups default to the bottom.
 
+The eye toggle beside it, or `y`, hides stopped sessions inside groups. The first press hides their rows and each header that lost some shows `shown/total`; the second also hides the groups left empty, except pinned projects; the third shows everything again. Ungrouped sessions on the group axis and the Snoozed & archived footer are never hidden, the open session stays open with its group header marked, and drag is off while hiding. The choice is per-browser, like the sort.
+
 ## Triage: pin, archive, snooze
 
 Right-click (long-press on touch) a session row:

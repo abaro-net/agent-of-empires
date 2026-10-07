@@ -4,6 +4,7 @@ import { pluginSortSpecs } from "../lib/pluginUi";
 import type { ProjectInfo, RepoGroup, Workspace } from "../lib/types";
 import { SidebarSystemHealth } from "./SystemHealthStrip";
 import type { SidebarAxis } from "../lib/sidebarAxis";
+import type { SidebarHideStopped } from "../lib/sidebarHideStopped";
 import {
   archivableWorkspaces,
   type NestedSidebarGroup,
@@ -26,6 +27,9 @@ import {
   filterFlat,
   filterNested,
   filterOrg,
+  hideStoppedFlat,
+  hideStoppedNested,
+  hideStoppedOrg,
   makeRowFilter,
   renderedOrder,
   sunkViews,
@@ -86,10 +90,24 @@ interface Props {
   onPluginSortChange: (ref: { pluginId: string; entryId: string }) => void;
   axis: SidebarAxis;
   onAxisChange: (axis: SidebarAxis) => void;
+  hideStopped: SidebarHideStopped;
+  onCycleHideStopped: () => void;
 }
 
 export function WorkspaceSidebar(props: Props) {
-  const { groups, nestedGroups, orgGroups, trashedWorkspaces = [], activeId, open, readOnly, axis } = props;
+  const { trashedWorkspaces = [], activeId, open, readOnly, axis, hideStopped } = props;
+  const groups = useMemo(
+    () => hideStoppedFlat(props.groups, hideStopped, activeId),
+    [props.groups, hideStopped, activeId],
+  );
+  const nestedGroups = useMemo(
+    () => hideStoppedNested(props.nestedGroups, hideStopped, activeId),
+    [props.nestedGroups, hideStopped, activeId],
+  );
+  const orgGroups = useMemo(
+    () => hideStoppedOrg(props.orgGroups, hideStopped, activeId),
+    [props.orgGroups, hideStopped, activeId],
+  );
   const { settings: webSettings, update: updateWebSettings } = useWebSettings();
   const rightSide = webSettings.sidebarSide === "right";
   const compact = webSettings.sidebarCompact;
@@ -107,6 +125,7 @@ export function WorkspaceSidebar(props: Props) {
   // and on axes (the user-group axis) whose groups cannot persist an order.
   const reorderDisabled =
     !!readOnly ||
+    hideStopped !== "off" ||
     props.sortMode === "lastActivity" ||
     pluginSortActive ||
     facets.activeFacets.length > 0 ||
@@ -235,6 +254,8 @@ export function WorkspaceSidebar(props: Props) {
           compact={compact}
           axis={axis}
           onAxisChange={props.onAxisChange}
+          hideStopped={hideStopped}
+          onCycleHideStopped={props.onCycleHideStopped}
           sortMode={props.sortMode}
           onSortModeChange={props.onSortModeChange}
           pluginSorts={pluginSorts}

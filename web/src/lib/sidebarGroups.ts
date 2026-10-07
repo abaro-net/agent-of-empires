@@ -49,6 +49,8 @@ export interface SidebarGroup {
   pinned: boolean;
   /** Pinned with no live workspace. */
   pinnedEmpty: boolean;
+  /** Workspaces the stopped-session filter took out of this group; `keepHeader` renders the header with none left. */
+  hidden?: { ids: string[]; keepHeader: boolean };
 }
 
 function isSyntheticRepoGroup(id: string): boolean {
@@ -186,7 +188,7 @@ export function sidebarGroupHasLiveWorkspace(group: SidebarGroup): boolean {
 
 // A pinned-but-empty project still renders its header.
 export function sidebarGroupShouldRender(group: SidebarGroup): boolean {
-  return group.pinnedEmpty || sidebarGroupHasLiveWorkspace(group);
+  return group.pinnedEmpty || !!group.hidden?.keepHeader || sidebarGroupHasLiveWorkspace(group);
 }
 
 // Workspaces whose primary session (`sessions[0]`, the triage target) is not archived.
@@ -238,7 +240,7 @@ export function nestedSidebarGroupHasLiveWorkspace(group: NestedSidebarGroup): b
 }
 
 export function nestedSidebarGroupShouldRender(group: NestedSidebarGroup): boolean {
-  return group.repo.pinnedEmpty || group.subgroups.some(sidebarGroupShouldRender);
+  return group.repo.pinnedEmpty || !!group.repo.hidden?.keepHeader || group.subgroups.some(sidebarGroupShouldRender);
 }
 
 // A partition of repos by host-scoped remote owner.

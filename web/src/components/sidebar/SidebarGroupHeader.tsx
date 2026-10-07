@@ -205,7 +205,7 @@ export const SidebarGroupHeader = memo(function SidebarGroupHeader(props: Props)
           )}
           {!compact && (
             <span className="shrink-0 text-[12px] tabular-nums text-text-dim" data-testid="sidebar-group-session-count">
-              ({sessionCount})
+              ({group.hidden ? `${sessionCount}/${sessionCount + group.hidden.ids.length}` : sessionCount})
             </span>
           )}
         </button>

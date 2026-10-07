@@ -31,6 +31,7 @@ describe("isSyncedKey", () => {
       "aoe.acp.toolDensity.v1",
       "aoe-sidebar-sort-mode",
       "aoe-sidebar-axis",
+      "aoe-sidebar-hide-stopped",
       "aoe-sidebar-sunk-expanded",
       "aoe-repo-appearance-v1",
       "aoe-repo-group-order-v1",

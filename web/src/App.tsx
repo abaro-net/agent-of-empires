@@ -31,7 +31,8 @@ import { PluginUiProvider, usePluginUiEntries } from "./lib/pluginUiContext";
 import { buildSortValueMap, pluginSortSpecs } from "./lib/pluginUi";
 import type { PluginSortContext, SidebarSortMode } from "./lib/sidebarSort";
 import { nextAttentionSessionId, sessionNeedsAttention, workspaceIsTrashed } from "./lib/sidebarSort";
-import { useSidebarAxis, useSidebarSortMode } from "./hooks/useSidebarPrefs";
+import { useSidebarAxis, useSidebarHideStopped, useSidebarSortMode } from "./hooks/useSidebarPrefs";
+import { HIDE_STOPPED_LABEL, NEXT_HIDE_STOPPED } from "./lib/sidebarHideStopped";
 import { repoGroupToSidebarGroup, type SidebarGroup } from "./lib/sidebarGroups";
 import { useProjects } from "./hooks/useProjects";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
@@ -427,6 +428,12 @@ function AppContent({
 
   const [sidebarSortMode, setSidebarSortMode] = useSidebarSortMode();
   const [sidebarAxis, setSidebarAxis] = useSidebarAxis();
+  const [sidebarHideStopped, setSidebarHideStopped] = useSidebarHideStopped();
+  const cycleSidebarHideStopped = useCallback(() => {
+    const next = NEXT_HIDE_STOPPED[sidebarHideStopped];
+    setSidebarHideStopped(next);
+    toastBus.handler?.info(HIDE_STOPPED_LABEL[next]);
+  }, [sidebarHideStopped, setSidebarHideStopped]);
 
   // Active plugin sort (#2401): an ephemeral selection of a live `sort-key`
   // entry. Not persisted (plugin entries die with the daemon). The ref is only
@@ -1706,6 +1713,7 @@ function AppContent({
       () => ({
         onNew: handleNewSession,
         onJumpToAttention: handleJumpToAttention,
+        onCycleHideStopped: cycleSidebarHideStopped,
         onNewScratch: handleNewScratch,
         onDiff: () => toggleDiff(),
         // Escape closes local UI surfaces only (dialogs, palette,
@@ -1757,6 +1765,7 @@ function AppContent({
         handleNewSession,
         handleNewScratch,
         handleJumpToAttention,
+        cycleSidebarHideStopped,
       ],
     ),
   );
@@ -1806,6 +1815,8 @@ function AppContent({
     onOpenAbout: handleOpenAbout,
     onGoDashboard: handleGoDashboard,
     onToggleSidebar: handleToggleSidebar,
+    hideStopped: sidebarHideStopped,
+    onCycleHideStopped: cycleSidebarHideStopped,
     onLogout,
   });
 
@@ -2389,6 +2400,8 @@ function AppContent({
               onPluginSortChange={setPluginSortRef}
               axis={sidebarAxis}
               onAxisChange={setSidebarAxis}
+              hideStopped={sidebarHideStopped}
+              onCycleHideStopped={cycleSidebarHideStopped}
             />
           )}
 

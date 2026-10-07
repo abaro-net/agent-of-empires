@@ -3,8 +3,9 @@
 import { renderHook, act } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { useSidebarAxis, useSidebarSortMode } from "./useSidebarPrefs";
+import { useSidebarAxis, useSidebarHideStopped, useSidebarSortMode } from "./useSidebarPrefs";
 import { SIDEBAR_AXIS_KEY } from "../lib/sidebarAxis";
+import { SIDEBAR_HIDE_STOPPED_KEY } from "../lib/sidebarHideStopped";
 import { SIDEBAR_SORT_MODE_KEY } from "../lib/sidebarSort";
 
 beforeEach(() => {
@@ -44,6 +45,9 @@ function persistedChoiceCases<T extends string>(
 // "org" (#3283) and "repo+group" (#1720) must survive a reload.
 describe("useSidebarAxis", () =>
   persistedChoiceCases(SIDEBAR_AXIS_KEY, useSidebarAxis, "repo", ["org", "group", "repo+group"]));
+
+describe("useSidebarHideStopped", () =>
+  persistedChoiceCases(SIDEBAR_HIDE_STOPPED_KEY, useSidebarHideStopped, "off", ["rows", "groups"]));
 
 describe("useSidebarSortMode", () =>
   persistedChoiceCases(SIDEBAR_SORT_MODE_KEY, useSidebarSortMode, "manual", ["lastActivity"]));

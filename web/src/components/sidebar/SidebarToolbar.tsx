@@ -1,5 +1,6 @@
-import { Layers, ListFilter } from "lucide-react";
+import { Eye, EyeClosed, EyeOff, Layers, ListFilter } from "lucide-react";
 import type { SidebarAxis } from "../../lib/sidebarAxis";
+import { HIDE_STOPPED_LABEL, type SidebarHideStopped } from "../../lib/sidebarHideStopped";
 import type { SidebarSortMode } from "../../lib/sidebarSort";
 import { toneTextClass, type PluginFacetSpec, type PluginSortSpec } from "../../lib/pluginUi";
 import { OFFLINE_TITLE } from "../../lib/connectionState";
@@ -33,10 +34,14 @@ const AXES: Record<SidebarAxis, { next: SidebarAxis; heading: string; tooltip: s
   },
 };
 
+const HIDE_STOPPED_ICON: Record<SidebarHideStopped, typeof Eye> = { off: Eye, rows: EyeOff, groups: EyeClosed };
+
 export function SidebarToolbar({
   compact,
   axis,
   onAxisChange,
+  hideStopped,
+  onCycleHideStopped,
   sortMode,
   onSortModeChange,
   pluginSorts,
@@ -56,6 +61,8 @@ export function SidebarToolbar({
   compact: boolean;
   axis: SidebarAxis;
   onAxisChange: (axis: SidebarAxis) => void;
+  hideStopped: SidebarHideStopped;
+  onCycleHideStopped: () => void;
   sortMode: SidebarSortMode;
   onSortModeChange: (mode: SidebarSortMode) => void;
   pluginSorts: PluginSortSpec[];
@@ -73,6 +80,7 @@ export function SidebarToolbar({
   onClose: () => void;
 }) {
   const axisSpec = AXES[axis];
+  const HideIcon = HIDE_STOPPED_ICON[hideStopped];
   return (
     <div className={`${compact ? "px-1" : "px-3"} pt-3 pb-1 flex items-center`}>
       {compact ? (
@@ -92,6 +100,18 @@ export function SidebarToolbar({
               className={`${TOOLBAR_BUTTON} ${TOOLBAR_TINT(axis !== "repo")}`}
             >
               <Layers className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
+          <Tooltip text={`${HIDE_STOPPED_LABEL[hideStopped]} (y)`}>
+            <button
+              onClick={onCycleHideStopped}
+              aria-pressed={hideStopped !== "off"}
+              aria-label={HIDE_STOPPED_LABEL[hideStopped]}
+              data-testid="sidebar-hide-stopped-toggle"
+              data-mode={hideStopped}
+              className={`${TOOLBAR_BUTTON} ${TOOLBAR_TINT(hideStopped !== "off")}`}
+            >
+              <HideIcon className="h-3.5 w-3.5" />
             </button>
           </Tooltip>
           <SidebarSortPicker
