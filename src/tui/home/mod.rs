@@ -371,6 +371,8 @@ pub struct HomeView {
 
     pub(super) strict_hotkeys: bool,
 
+    pub(super) typing_compose_window: Option<std::time::Duration>,
+
     pub(super) confirm_before_quit: bool,
 
     pub(super) host_tab_title: bool,

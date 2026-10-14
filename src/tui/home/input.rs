@@ -2627,13 +2627,7 @@ impl HomeView {
         }
 
         // Registry-driven action keys.
-        let ctx = bindings::Ctx {
-            view_mode: self.view_mode.clone(),
-            sort_order: self.sort_order,
-            has_search: !self.search_matches.is_empty(),
-            project_group_selected: self.project_group_at_cursor().is_some(),
-        };
-        match bindings::resolve_action(&key, self.strict_hotkeys, &ctx) {
+        match bindings::resolve_action(&key, self.strict_hotkeys, &self.binding_ctx()) {
             Some(bindings::ResolvedAction::Core(id)) => return self.run_action(id, update_info),
             Some(bindings::ResolvedAction::Plugin(action)) => {
                 // Tier 0 has no plugin executor; the binding resolves and is
@@ -6401,11 +6395,33 @@ impl HomeView {
         }
     }
 
+    pub(super) fn binding_ctx(&self) -> bindings::Ctx {
+        bindings::Ctx {
+            view_mode: self.view_mode.clone(),
+            sort_order: self.sort_order,
+            has_search: !self.search_matches.is_empty(),
+            project_group_selected: self.project_group_at_cursor().is_some(),
+        }
+    }
+
     /// Resolve `(id, title, target)` for an untargeted paste, 'm', or strict-mode letter
     /// capture. Agent targets keep the historical gate that the pane must already exist,
     /// so the dialog can't open against a stopped session; terminal targets relax it,
     /// since `execute_send_message` spawns the paired terminal on demand.
     fn resolve_send_target(&self) -> Option<(String, String, live_send::LiveSendTarget)> {
+        self.send_target_where(|id, title| {
+            crate::tmux::Session::new(id, title)
+                .map(|s| s.exists())
+                .unwrap_or(false)
+        })
+    }
+
+    /// `resolve_send_target` with the agent pane check supplied as
+    /// `(id, title) -> bool`, so the per-key typing gate can answer from the session cache.
+    pub(super) fn send_target_where(
+        &self,
+        agent_pane_exists: impl Fn(&str, &str) -> bool,
+    ) -> Option<(String, String, live_send::LiveSendTarget)> {
         let id = self.selected_session.as_ref()?;
         let inst = self.get_instance(id)?;
         if matches!(inst.status, Status::Creating | Status::Deleting) {
@@ -6413,9 +6429,7 @@ impl HomeView {
         }
         let target = self.current_send_target();
         let ready = match &target {
-            live_send::LiveSendTarget::Agent => crate::tmux::Session::new(&inst.id, &inst.title)
-                .map(|s| s.exists())
-                .unwrap_or(false),
+            live_send::LiveSendTarget::Agent => agent_pane_exists(&inst.id, &inst.title),
             live_send::LiveSendTarget::Terminal | live_send::LiveSendTarget::ContainerTerminal => {
                 true
             }

@@ -2,6 +2,8 @@
 
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent};
+
 use super::*;
 
 const FLASH_WINDOW: Duration = Duration::from_secs(3);
@@ -169,4 +171,39 @@ impl HomeView {
             || self.new_dialog.is_some()
             || self.settings_view.is_some()
     }
+
+    /// The typing window `key` opens, only on the bare list where single
+    /// letters are shortcuts and a compose dialog has a target. Enter and the
+    /// keys that open a text surface of their own (search, compose) run at once.
+    pub(in crate::tui) fn typing_burst_window(&self, key: &KeyEvent) -> Option<Duration> {
+        let window = self.typing_compose_window?;
+        if key.code == KeyCode::Enter
+            || self.has_dialog()
+            || self
+                .structured_preview
+                .as_ref()
+                .is_some_and(|v| v.is_active())
+        {
+            return None;
+        }
+        if matches!(
+            bindings::resolve(key, self.strict_hotkeys, &self.binding_ctx()),
+            Some(bindings::ActionId::SearchStart | bindings::ActionId::SendMessage)
+        ) {
+            return None;
+        }
+        self.send_target_where(|id, title| {
+            crate::tmux::session_exists_for_display(
+                &crate::tmux::Session::resolve_name_for_display(id, title),
+            )
+        })
+        .map(|_| window)
+    }
+}
+
+pub(super) fn typing_compose_window(
+    session: &crate::session::config::SessionConfig,
+) -> Option<Duration> {
+    (session.typing_compose_window_ms > 0)
+        .then(|| Duration::from_millis(session.typing_compose_window_ms.into()))
 }

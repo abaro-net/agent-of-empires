@@ -789,6 +789,16 @@ last_seen_version = "{}"
         self.synchronize_input();
     }
 
+    /// An SGR 1006 pointer motion with no input barrier, so it can land inside a key burst.
+    pub fn send_mouse_move_unfenced(&self, col: u16, row: u16) {
+        assert!(self.spawned, "must call spawn_tui() or spawn() first");
+        let seq = format!("\x1b[<35;{col};{row}M");
+        self.tmux_ok(
+            &["send-keys", "-t", &self.session_name, "-l", &seq],
+            "send_mouse_move_unfenced",
+        );
+    }
+
     /// Deliver `text` as one bracketed paste, hex-encoded so tmux cannot
     /// reinterpret newlines or semicolons.
     pub fn send_paste(&self, text: &str) {

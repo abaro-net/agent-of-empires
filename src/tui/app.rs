@@ -34,6 +34,13 @@ const PASTE_BURST_INTER_KEY_MS: u64 = 5;
 /// Shorter bursts are replayed as individual keys so typing isn't mistaken for a paste.
 const PASTE_BURST_MIN_LEN: usize = 3;
 
+/// Printable keys, Enter aside, that make a slower burst typing on the bare list.
+const TYPING_BURST_MIN_KEYS: usize = 2;
+
+/// A same-key run this long at typing speed is a held key, replayed without
+/// waiting out the window. Two would split words that start with a double letter.
+const HELD_KEY_MIN_RUN: usize = 3;
+
 /// Session creates since the last confirmed telemetry snapshot send.
 static TUI_SESSION_CREATES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -203,6 +210,13 @@ impl Drop for IgnoreSignalsGuard {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum Burst {
+    Paste,
+    Typing,
+    Keys,
+}
+
 impl App {
     /// Printable ASCII or Enter with no modifier other than Shift. Enter is
     /// included so newlines inside a Mosh-stripped paste stay in the burst.
@@ -236,6 +250,25 @@ impl App {
         keys.iter()
             .skip(1)
             .all(|key| key.code == first.code && key.modifiers == first.modifiers)
+    }
+
+    /// `paste_like`: every gap under the paste threshold. `typing`: collected
+    /// under the typing window, where Enter does not count toward the minimum.
+    fn classify_burst(keys: &[KeyEvent], paste_like: bool, typing: bool) -> Burst {
+        if paste_like && keys.len() >= PASTE_BURST_MIN_LEN && !Self::is_auto_repeat_burst(keys) {
+            return Burst::Paste;
+        }
+        if typing {
+            let typed: Vec<KeyEvent> = keys
+                .iter()
+                .filter(|k| k.code != KeyCode::Enter)
+                .copied()
+                .collect();
+            if typed.len() >= TYPING_BURST_MIN_KEYS && !Self::is_auto_repeat_burst(&typed) {
+                return Burst::Typing;
+            }
+        }
+        Burst::Keys
     }
 
     /// Peel a trailing Enter off a burst so it is replayed as Submit rather
@@ -648,13 +681,17 @@ impl App {
                             if self.home.wants_paste_burst() && Self::is_burst_candidate(&key) {
                                 let first_char = Self::burst_char_for(&key)
                                     .expect("is_burst_candidate guarantees burst_char_for returns Some");
+                                let paste_gap = Duration::from_millis(PASTE_BURST_INTER_KEY_MS);
+                                let typing_window = self.home.typing_burst_window(&key);
                                 let mut burst_str = String::new();
                                 burst_str.push(first_char);
                                 let mut burst_keys: Vec<KeyEvent> = vec![key];
                                 let mut deferred: Option<Event> = None;
+                                let mut paste_like = true;
+                                let mut last_key_at = tokio::time::Instant::now();
                                 loop {
-                                    let next = tokio::time::timeout(
-                                        Duration::from_millis(PASTE_BURST_INTER_KEY_MS),
+                                    let next = tokio::time::timeout_at(
+                                        last_key_at + typing_window.unwrap_or(paste_gap),
                                         self.event_stream.as_mut().expect("event_stream missing").next(),
                                     ).await;
                                     match next {
@@ -663,10 +700,24 @@ impl App {
                                                 k.kind,
                                                 KeyEventKind::Press | KeyEventKind::Repeat
                                             ) => {}
+                                        Ok(Some(Ok(Event::Mouse(m))))
+                                            if typing_window.is_some()
+                                                && m.kind == MouseEventKind::Moved => {}
                                         Ok(Some(Ok(Event::Key(k)))) if Self::is_burst_candidate(&k) => {
                                             if let Some(c) = Self::burst_char_for(&k) {
+                                                let now = tokio::time::Instant::now();
+                                                paste_like &= now.duration_since(last_key_at) < paste_gap;
+                                                last_key_at = now;
                                                 burst_str.push(c);
                                                 burst_keys.push(k);
+                                            }
+                                            // A held key repeats inside the typing window; replay it now.
+                                            if typing_window.is_some()
+                                                && !paste_like
+                                                && burst_keys.len() >= HELD_KEY_MIN_RUN
+                                                && Self::is_auto_repeat_burst(&burst_keys)
+                                            {
+                                                break;
                                             }
                                         }
                                         Ok(Some(Ok(other))) => {
@@ -676,9 +727,16 @@ impl App {
                                         _ => break,
                                     }
                                 }
-                                if burst_keys.len() >= PASTE_BURST_MIN_LEN
-                                    && !Self::is_auto_repeat_burst(&burst_keys)
-                                {
+                                let burst = Self::classify_burst(
+                                    &burst_keys,
+                                    paste_like,
+                                    typing_window.is_some(),
+                                );
+                                if burst == Burst::Typing {
+                                    // A trailing Enter is dropped: nothing is sent until the dialog confirms.
+                                    let (typed, _) = Self::split_trailing_enter(&burst_str, &burst_keys);
+                                    self.home.handle_paste(&typed);
+                                } else if burst == Burst::Paste {
                                     let (paste_text, trailing_enter) =
                                         Self::split_trailing_enter(&burst_str, &burst_keys);
                                     if !paste_text.is_empty() {
@@ -3442,6 +3500,35 @@ mod tests {
         ];
         for (keys, expected) in cases {
             assert_eq!(App::is_auto_repeat_burst(&keys), expected, "{keys:?}");
+        }
+    }
+
+    #[test]
+    fn classify_burst_separates_paste_typing_and_keys() {
+        let shifted = vec![
+            KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        ];
+        // (keys, paste_like, typing, expected)
+        let cases = [
+            (keys("abc"), true, false, Burst::Paste),
+            (keys("abc\n"), true, true, Burst::Paste),
+            (keys("ab"), true, false, Burst::Keys),
+            (keys("ab"), false, false, Burst::Keys),
+            (keys("ab"), false, true, Burst::Typing),
+            (keys("ab\n"), false, true, Burst::Typing),
+            (shifted, false, true, Burst::Typing),
+            (keys("a\n"), false, true, Burst::Keys),
+            (keys("jj"), false, true, Burst::Keys),
+            (keys("jj\n"), false, true, Burst::Keys),
+            (keys("jjj"), true, true, Burst::Keys),
+        ];
+        for (keys, paste_like, typing, expected) in cases {
+            assert_eq!(
+                App::classify_burst(&keys, paste_like, typing),
+                expected,
+                "{keys:?} paste_like={paste_like} typing={typing}"
+            );
         }
     }
 

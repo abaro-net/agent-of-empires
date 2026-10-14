@@ -252,6 +252,72 @@ fn live_mode_counts_as_dialog_and_wants_paste_burst() {
     assert!(env.view.wants_paste_burst());
 }
 
+/// Only a plain key on the bare list, with a session to compose to, opens the typing window.
+#[test]
+#[serial]
+fn typing_burst_window_holds_only_for_plain_keys_on_the_bare_list() {
+    let mut env = create_test_env_with_sessions(1);
+    let a = key(KeyCode::Char('a'));
+    let id = env
+        .view
+        .flat_items
+        .iter()
+        .find_map(|item| match item {
+            crate::session::Item::Session { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    env.view.selected_session = Some(id.clone());
+    assert_eq!(env.view.typing_burst_window(&a), None, "off by default");
+    crate::session::config::update_config(|c| c.session.typing_compose_window_ms = 150).unwrap();
+    env.view
+        .refresh_from_config(ConfigRefreshOrigin::Interactive);
+    let cache = crate::tmux::SessionCacheGuard::capture();
+    cache.force_present(&[]);
+    assert_eq!(
+        env.view.typing_burst_window(&a),
+        None,
+        "no compose target while the agent pane is missing"
+    );
+    let inst = env.view.get_instance(&id).unwrap().clone();
+    cache.force_present(&[crate::tmux::Session::generate_name(&inst.id, &inst.title).as_str()]);
+    cache.force_stale();
+    let window = Some(std::time::Duration::from_millis(150));
+    assert_eq!(env.view.typing_burst_window(&a), window);
+    let shifted = KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT);
+    assert_eq!(env.view.typing_burst_window(&shifted), window);
+    for code in [KeyCode::Enter, KeyCode::Char('/'), KeyCode::Char('m')] {
+        assert_eq!(env.view.typing_burst_window(&key(code)), None, "{code:?}");
+    }
+    crate::session::config::update_config(|c| c.session.strict_hotkeys = true).unwrap();
+    env.view
+        .refresh_from_config(ConfigRefreshOrigin::Interactive);
+    let shifted_m = KeyEvent::new(KeyCode::Char('M'), KeyModifiers::SHIFT);
+    assert_eq!(
+        env.view.typing_burst_window(&shifted_m),
+        None,
+        "strict compose key"
+    );
+    assert_eq!(
+        env.view.typing_burst_window(&key(KeyCode::Char('m'))),
+        window
+    );
+    env.view.search_active = true;
+    assert_eq!(
+        env.view.typing_burst_window(&a),
+        None,
+        "search owns the keys"
+    );
+    env.view.search_active = false;
+    assert_eq!(env.view.typing_burst_window(&a), window);
+    install_live_orphan(&mut env);
+    assert_eq!(
+        env.view.typing_burst_window(&a),
+        None,
+        "live-send owns the keys"
+    );
+}
+
 /// Tab no-ops with nothing selected. Otherwise start_live_send is deliberately permissive:
 /// it accepts any non-Creating instance and defers ensure_pane_ready to prepare_live_send,
 /// or Tab would no-op on dead-but-recoverable rows whose tmux session doesn't exist yet.

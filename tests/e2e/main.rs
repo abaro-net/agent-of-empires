@@ -62,5 +62,6 @@ mod settings;
 mod skills_tui;
 mod stop_confirm;
 mod tool_sessions;
+mod typing_compose;
 mod unified_view;
 mod update_command;

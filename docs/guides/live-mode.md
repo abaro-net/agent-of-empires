@@ -6,6 +6,8 @@ Live mode is a "feels attached" alternative to a full tmux attach: the home view
 
 Press `Tab` on a runnable session, or set live mode as your default so `Enter` and a click drop straight into it. **New Session Mode** makes new sessions open in live mode without changing what `Enter` does. `Ctrl+Q` always leaves, in a single press, independent of the leader below. The status bar shows a `● LIVE → <session>` banner with the exit chord while you are relayed.
 
+If you often start typing before noticing you are not in live mode, set [`typing_compose_window_ms`](configuration.md#session) so a typed burst opens the send-message dialog instead of firing list shortcuts.
+
 Control chords reach the agent: `Ctrl+C` interrupts it rather than quitting AoE, and the banner flashes a brief reminder on each press. To quit AoE, leave live mode first.
 
 Live send works for the Terminal and Tool views too, not just the agent pane: whichever pane is on screen is what your keystrokes reach. Turning on **Auto Live-Send On View Switch** (Interaction settings, off by default) starts the relay as soon as you switch views.

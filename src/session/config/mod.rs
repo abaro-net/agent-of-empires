@@ -1547,6 +1547,25 @@ pub struct SessionConfig {
     )]
     pub live_send_on_view_switch: bool,
 
+    /// Keys typed into the home list less than this many milliseconds apart
+    /// open the send-message dialog with the text instead of firing shortcuts,
+    /// for when you type thinking you are in live mode. Two different printable
+    /// keys count as typing; one key repeated stays navigation, and a trailing
+    /// Enter is dropped so the text waits for you to confirm. While on, every
+    /// printable key on the list waits this long before it runs, except `/`
+    /// and the send-message key. 0 turns it off.
+    #[serde(default)]
+    #[setting(
+        label = "Typing Opens Compose (ms)",
+        widget = "number",
+        min = 0,
+        max = 2000,
+        validate = "range:0:2000",
+        category = "Interaction",
+        tui_only
+    )]
+    pub typing_compose_window_ms: u32,
+
     /// What a single mouse click on a session row does in the Agent view. Live
     /// mode (default) enters live-send for the clicked row, the historical
     /// behavior. Select only just moves the cursor so you can read the preview
@@ -1936,6 +1955,7 @@ impl Default for SessionConfig {
             default_attach_mode: AttachMode::default(),
             new_session_mode: NewSessionMode::default(),
             live_send_on_view_switch: false,
+            typing_compose_window_ms: 0,
             click_action: ClickAction::default(),
             confirm_before_quit: true,
             unread_indicator: true,
